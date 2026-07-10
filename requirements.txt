@@ -1,0 +1,13 @@
+exif>=1.6.1
+httpx[http2]>=0.28.1
+pydantic>=2.12.0
+tqdm>=4.67.1
+folium>=0.15.0
+pillow>=10.0.0
+PyQtWebEngine>=5.15.0
+PyQt5>=5.15.0
+mutagen>=1.47.0
+pytz
+timezonefinder
+packaging
+psutil>=5.9.0

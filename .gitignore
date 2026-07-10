@@ -1,0 +1,44 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+.venv/
+venv/
+venv312/
+
+build/
+dist/
+*.spec.bak
+
+accounts/
+downloads/
+json/
+*.zip
+technical/staging/
+
+# Logs and local traces
+*.log
+_trace.txt
+_t.txt
+_t2.txt
+_startup_test.txt
+
+# Reference material and third-party clones (dev-only, not shipped)
+extra/
+
+tests/runs/
+tests/scratch/
+
+# Bundled ffmpeg binaries (fetched by scripts/fetch_ffmpeg.ps1 at build time)
+tools/ffmpeg/*.exe
+tools/ffmpeg/*.dll
+tools/ffmpeg/*.lib
+tools/ffmpeg/*.def
+tools/ffmpeg/*.pdb
+
+.pytest_cache/
+.mypy_cache/
+
+.vscode/
+.idea/
