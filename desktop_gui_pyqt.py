@@ -476,9 +476,9 @@ class MediaViewer(QWidget):
             if sys.platform == 'win32':
                 os.startfile(file_path)
             elif sys.platform == 'darwin':
-                os.system(f'open "{file_path}"')
+                subprocess.Popen(['open', str(file_path)])
             else:  # Linux
-                os.system(f'xdg-open "{file_path}"')
+                subprocess.Popen(['xdg-open', str(file_path)])
         except Exception as e:
             self.show_error(f"Could not open player: {str(e)}")
     
@@ -730,9 +730,9 @@ class FullScreenMediaPopup(QWidget):
             if sys.platform == 'win32':
                 os.startfile(file_path)
             elif sys.platform == 'darwin':
-                os.system(f'open "{file_path}"')
+                subprocess.Popen(['open', str(file_path)])
             else:  # Linux
-                os.system(f'xdg-open "{file_path}"')
+                subprocess.Popen(['xdg-open', str(file_path)])
         except Exception as e:
             self.show_error(f"Could not open player: {str(e)}")
     
@@ -1478,95 +1478,6 @@ class MapWorker(QThread):
             self.scan_report = {}
             self.finished.emit([], 0, 0)
 
-class DownloadWorker(QThread):
-    finished = pyqtSignal(int)
-    output = pyqtSignal(str)
-    
-    def __init__(self, memories, output_dir, concurrent=5, add_exif=True, skip_existing=False, limit=0, max_speed=None):
-        super().__init__()
-        self.memories = memories
-        self.output_dir = output_dir
-        self.concurrent = concurrent
-        self.add_exif = add_exif
-        self.skip_existing = skip_existing
-        self.limit = limit
-        self.max_speed = max_speed
-        self._is_running = True
-        self._should_cancel = False
-    
-    def run(self):
-        import asyncio
-        from smd.utils import load_memories, parse_speed
-        from smd.core import download_all, BandwidthLimiter
-        
-        try:
-            if sys.platform == 'win32':
-                asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
-            # Load memories (already passed in self.memories)
-            memories = self.memories
-            if not memories:
-                self.output.emit("No memories found in JSON.")
-                self.finished.emit(0)
-                return
-
-            # Set up rate limiter
-            limiter = None
-            if self.max_speed:
-                try:
-                    bps = parse_speed(self.max_speed)
-                    limiter = BandwidthLimiter(bps)
-                except Exception:
-                    pass
-
-            def progress_callback(current, total, success, size_bytes):
-                # Don't update logs here, only progress bar to reduce spam
-                # self.output.emit is handled by status_callback mostly
-                # But we can reconstruct the progress string if needed by legacy
-                pct = int(current / total * 100) if total > 0 else 0
-                self.output.emit(f"Downloading: {pct}%| | {current}/{total}")
-            
-            def status_callback(msg):
-                # This actually sends logs to the GUI
-                self.output.emit(msg)
-
-            # Wrapper for cancellation
-            def check_cancel():
-                return not self._is_running or self._should_cancel
-
-            # Run download
-            asyncio.run(download_all(
-                memories=memories,
-                output_dir=self.output_dir,
-                concurrent=self.concurrent,
-                add_exif=self.add_exif,
-                skip_existing=self.skip_existing,
-                max_retries=3,
-                bandwidth_limiter=limiter,
-                progress_callback=progress_callback,
-                status_callback=status_callback,
-                should_stop=check_cancel,
-                limit=self.limit
-            ))
-            
-            # Check if we stopped due to cancellation
-            if self._should_cancel:
-                self.finished.emit(1) # Using 1 for successful/clean exit even on cancel, GUI handles 'cancelled' state
-            else:
-                self.finished.emit(0)
-            
-        except Exception as e:
-            self.output.emit(f"Error in downloader: {str(e)}")
-            import traceback
-            self.output.emit(traceback.format_exc())
-            self.finished.emit(1) # Error
-
-    def cancel(self):
-        self._is_running = False
-        self._should_cancel = True
-        self.output.emit('[*] Cancelling download...')
-
-
 class StagingCheckWorker(QThread):
     """Verify staging folder can be safely deleted."""
     finished = pyqtSignal(object)
@@ -2213,181 +2124,6 @@ class LocalExportWorker(QThread):
             self._heartbeat_running = False
 
 
-class GPSEmbedWorker(QThread):
-    """Worker thread to embed GPS data from JSON into video files"""
-    finished = pyqtSignal(int, int, int)  # processed, success, failed
-    progress = pyqtSignal(int, int, str)  # current, total, current_file
-    output = pyqtSignal(str)  # log messages
-    error = pyqtSignal(str)
-    
-    def __init__(self, folder, json_path):
-        super().__init__()
-        self.folder = Path(folder)
-        self.json_path = Path(json_path)
-        self.cancelled = False
-        
-    def cancel(self):
-        self.cancelled = True
-        
-    def parse_gps_from_location(self, location_str):
-        """Parse GPS from JSON location field like 'Latitude, Longitude: 56.115364, 10.155189'"""
-        try:
-            if not location_str or location_str == 'N/A':
-                return None
-            # Format: "Latitude, Longitude: lat, lon"
-            if ':' in location_str:
-                coords_part = location_str.split(':', 1)[1].strip()
-                parts = coords_part.split(',')
-                if len(parts) == 2:
-                    lat = float(parts[0].strip())
-                    lon = float(parts[1].strip())
-                    return (lat, lon)
-        except (ValueError, IndexError, AttributeError):
-            pass
-        return None
-    
-    def embed_gps_with_mutagen(self, video_path, lat, lon, memory_date=None):
-        """Use the unified metadata writer to embed GPS into existing videos."""
-        try:
-            from datetime import datetime, timezone
-            from types import SimpleNamespace
-            from smd.metadata import apply_video_metadata
-
-            if memory_date is None:
-                memory_date = datetime.now(timezone.utc)
-
-            # apply_video_metadata only needs date/lat/lon/filename attributes.
-            mem_like = SimpleNamespace(
-                date=memory_date,
-                latitude=lat,
-                longitude=lon,
-                filename=video_path.stem,
-            )
-            apply_video_metadata(video_path, mem_like)
-            return True
-        except Exception as e:
-            self.output.emit(f'Error for {video_path.name}: {str(e)}')
-            return False
-
-    
-    def run(self):
-        try:
-            # Load JSON file
-            if not self.json_path.exists():
-                self.error.emit(f'JSON file not found: {self.json_path}')
-                self.finished.emit(0, 0, 0)
-                return
-            
-            with open(self.json_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            memories = data.get('Saved Media', [])
-            if not memories:
-                self.error.emit('No memories found in JSON file')
-                self.finished.emit(0, 0, 0)
-                return
-            
-            # Build lookup dict: filename -> (lat, lon, datetime_utc|None)
-            self.output.emit('📖 Building GPS lookup from JSON...')
-            gps_lookup = {}
-            for memory in memories:
-                date_str = memory.get('Date', '')
-                media_type = memory.get('Media Type', '')
-                location_str = memory.get('Location', '')
-                
-                if media_type == 'Video' and location_str:
-                    coords = self.parse_gps_from_location(location_str)
-                    if coords:
-                        # Convert date to filename format: "2025-12-23 19:22:46 UTC" -> "2025-12-23_19-22-46"
-                        try:
-                            date_part = date_str.split(' UTC')[0].strip()
-                            filename = date_part.replace(' ', '_').replace(':', '-')
-                            dt_obj = None
-                            try:
-                                from datetime import datetime, timezone
-                                dt_obj = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
-                            except Exception:
-                                dt_obj = None
-                            gps_lookup[filename] = (coords[0], coords[1], dt_obj)
-                        except Exception:
-                            pass
-            
-            self.output.emit(f'📊 Found GPS data for {len(gps_lookup)} videos in JSON')
-            
-            # Find all video files in folder
-            video_extensions = {'.mp4', '.mov', '.m4v'}
-            video_files = [
-                f for f in self.folder.rglob('*')
-                if f.is_file() and f.suffix.lower() in video_extensions
-            ]
-            
-            total = len(video_files)
-            if total == 0:
-                self.error.emit('No video files found in folder')
-                self.finished.emit(0, 0, 0)
-                return
-            
-            self.output.emit(f'🎬 Found {total} video files to process')
-            self.output.emit('')
-            
-            processed = 0
-            success = 0
-            failed = 0
-            skipped = 0
-            
-            for idx, video_file in enumerate(video_files):
-                if self.cancelled:
-                    self.output.emit('\n⏹️ Cancelled by user')
-                    break
-                
-                self.progress.emit(idx + 1, total, video_file.name)
-                
-                # Extract date from filename (e.g., "2025-12-23_19-22-46.mp4")
-                filename_base = video_file.stem  # Without extension
-                
-                if filename_base in gps_lookup:
-                    lat, lon, dt_obj = gps_lookup[filename_base]
-                    self.output.emit(f'📍 {video_file.name}: {lat:.6f}, {lon:.6f}')
-                    
-                    if self.embed_gps_with_mutagen(video_file, lat, lon, dt_obj):
-                        success += 1
-                        self.output.emit(f'   GPS embedded successfully')
-                    else:
-                        failed += 1
-                else:
-                    skipped += 1
-                    # Don't log every skipped file to avoid spam
-                    if skipped <= 5:
-                        self.output.emit(f'⏭️  {video_file.name}: No GPS in JSON')
-                
-                processed += 1
-            
-            if skipped > 5:
-                self.output.emit(f'⏭️  ... and {skipped - 5} more files without GPS data')
-            
-            self.output.emit('')
-            self.output.emit('=' * 60)
-            self.output.emit(f'Processed: {processed} | Success: {success} | Failed: {failed} | Skipped: {skipped}')
-            
-            self.finished.emit(processed, success, failed)
-            
-        except Exception as e:
-            self.error.emit(f'Error processing GPS embedding: {str(e)}')
-            self.finished.emit(0, 0, 0)
-
-
-class UpdateWorker(QThread):
-    update_available = pyqtSignal(dict)
-    
-    def run(self):
-        try:
-            from smd.updater import check_for_updates
-            update_info = check_for_updates()
-            if update_info:
-                self.update_available.emit(update_info)
-        except Exception:
-            pass
-
 class LiveRunDashboard(QWidget):
     """Live processing dashboard: stat cards + activity log."""
 
@@ -2556,11 +2292,6 @@ class DownloaderGUI(QMainWindow):
         self.show_signal_timer.start(100)  # Check every 100ms for faster response
         self.signal_file = Path(tempfile.gettempdir()) / 'snapchat_memories_show.signal'
         
-        # ExifTool verification removed (Pure Python now)
-        
-        # Check for updates
-        self.check_updates_on_startup()
-        
         # Theme: system default, persisted in settings
         self._load_and_apply_theme()
         self._apply_technical_view_ui()
@@ -2599,11 +2330,6 @@ class DownloaderGUI(QMainWindow):
         self._refresh_after_processing_actions()
         self._update_run_readiness()
 
-    def check_updates_on_startup(self):
-        self.update_worker = UpdateWorker()
-        self.update_worker.update_available.connect(self.show_update_dialog)
-        self.update_worker.start()
-
     def run_startup_self_check(self):
         """Confirm the all-in-one package is complete (no extra installs for end users)."""
         from smd.ffmpeg_bundle import bundled_status
@@ -2630,21 +2356,6 @@ class DownloaderGUI(QMainWindow):
             self._apply_status(self.status_label, 'SMD ready. Map preview limited in this build.', "warn")
         else:
             self._apply_status(self.status_label, 'Video tools missing - reinstall SMD from the official installer.', "err")
-
-    def show_update_dialog(self, info):
-        version = info.get('version')
-        url = info.get('url')
-        notes = info.get('release_notes', '')
-        
-        msg = QMessageBox(self)
-        msg.setWindowTitle("Update Available")
-        msg.setText(f"A new version ({version}) is available!")
-        msg.setInformativeText(f"{notes}\n\nDo you want to download it now?")
-        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        msg.setDefaultButton(QMessageBox.Yes)
-        
-        if msg.exec_() == QMessageBox.Yes:
-            QDesktopServices.openUrl(QUrl(url))
 
     def closeEvent(self, event):
         """Clean up temporary files when app closes."""
@@ -3449,13 +3160,6 @@ class DownloaderGUI(QMainWindow):
         self.status_animation_active = False
         self.status_animation_timer.stop()
     
-    def toggle_detailed_view(self, state):
-        """Toggle detailed view visibility"""
-        self.show_detailed_view = bool(state)
-        self.detailed_status.setVisible(self.show_detailed_view)
-        if self.show_detailed_view and self.current_file_being_processed:
-            self.detailed_status.setText(f"Processing: {self.current_file_being_processed}")
-    
     def refresh_system_profile(self):
         """Update PC / power labels and warn if power source changed."""
         from smd.system_profile import (
@@ -3864,18 +3568,6 @@ class DownloaderGUI(QMainWindow):
         self._suggest_account_from_export(zip_paths)
         self.update_export_ui_mode()
     
-    def select_destination(self):
-        default_dir = str(Path.home() / 'Downloads')
-        if not Path(default_dir).exists():
-            default_dir = str(Path.home())
-        
-        folder = QFileDialog.getExistingDirectory(self, 'Select Download Destination', default_dir)
-        if folder:
-            self.selected_dest = folder
-            self.dest_label.setText(Path(folder).name)
-            from smd.theme import apply_status_property
-            apply_status_property(self.dest_label, 'ok')
-
     def get_default_base_dir(self):
         """Default to Desktop/SMD Media as requested by user."""
         desktop = Path.home() / 'Desktop' / 'SMD Media'
@@ -3898,10 +3590,6 @@ class DownloaderGUI(QMainWindow):
             return str(base_dir)
         except Exception:
             return self.get_default_base_dir()
-
-    def ensure_account_paths(self, account_name: str):
-        paths = self._account_paths(account_name, create=True)
-        return paths.account_dir, paths.json_dir, paths.downloads_dir
 
     def _account_paths(self, account_name: str, *, create: bool = False):
         from smd.account_layout import AccountPaths, migrate_account_layout, normalize_account_dir, resolve_account_paths
@@ -4177,100 +3865,6 @@ class DownloaderGUI(QMainWindow):
 
         button.setMenu(menu)
 
-    def perform_download_scan(self, json_path: Path, downloads_dir: Path):
-        """Scan for existing files before starting download"""
-        try:
-            import json
-            from datetime import datetime, timezone
-            import pytz
-            from timezonefinder import TimezoneFinder
-            
-            with open(json_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            memories_data = data.get('Saved Media', [])
-            
-            total = len(memories_data)
-            existing = 0
-            tf = TimezoneFinder()
-            
-            # Quick scan for existing files with timezone-adjusted filenames
-            for i, mem in enumerate(memories_data):
-                if i % 100 == 0:
-                    progress = int((i / total) * 100)
-                    self.progress_bar.setValue(progress)
-                    self._apply_status(self.status_label, f'Scanning... {i}/{total} files checked', 'info')
-                    QApplication.processEvents()
-                
-                # Check if file exists with timezone-adjusted filename (same logic as main.py)
-                date_str = mem.get('Date', '')
-                if date_str:
-                    try:
-                        # Parse UTC datetime
-                        dt_utc = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
-                        
-                        # Apply timezone conversion based on GPS (same as main.py Memory.filename)
-                        local_dt = dt_utc
-                        lat = mem.get('Latitude')
-                        lon = mem.get('Longitude')
-                        
-                        if lat is not None and lon is not None and (lat != 0.0 or lon != 0.0):
-                            try:
-                                tz_name = tf.timezone_at(lat=lat, lng=lon)
-                                if tz_name:
-                                    tz = pytz.timezone(tz_name)
-                                    local_dt = dt_utc.astimezone(tz)
-                            except:
-                                local_dt = dt_utc.astimezone()
-                        else:
-                            local_dt = dt_utc.astimezone()
-                        
-                        # Generate filename with timezone-adjusted timestamp
-                        filename_base = local_dt.strftime("%Y-%m-%d_%H-%M-%S")
-                        
-                        # Check all possible extensions
-                        for ext in ['.jpg', '.jpeg', '.png', '.mp4', '.heic', '.mov', '.gif', '.webp', '.avi', '.mkv']:
-                            candidate = f"{filename_base}{ext}"
-                            for folder in (
-                                downloads_dir,
-                                downloads_dir / 'merged',
-                                downloads_dir / 'raw',
-                            ):
-                                if (folder / candidate).exists():
-                                    existing += 1
-                                    break
-                            else:
-                                continue
-                            break
-                    except:
-                        pass
-            
-            to_download = total - existing
-            self.progress_bar.setValue(0)
-            self._apply_status(
-                self.status_label,
-                f'Scan complete: {existing} existing, {to_download} to download',
-                'ok',
-            )
-            self.download_scan_complete = True
-            self.dl_total_files = total
-            QApplication.processEvents()
-            
-            # Small delay to show scan results
-            import time
-            time.sleep(1)
-            
-        except Exception as e:
-            self._apply_status(self.status_label, f'Scan error: {e}', 'err')
-    
-    def update_progress(self, message: str):
-        """Update progress message for file repair"""
-        self._apply_status(self.status_label, message, 'info')
-    
-    def append_log_message(self, message: str):
-        """Append log message to output area"""
-        # Could add to a dedicated log area if needed, for now just status
-        pass
-
     @staticmethod
     def _phase_from_log_message(message: str) -> str | None:
         low = message.lower()
@@ -4398,22 +3992,6 @@ class DownloaderGUI(QMainWindow):
         short = message.strip()
         if short and not short.startswith("⏳"):
             self._refresh_run_dashboard(status=short[:240], phase=phase, status_kind="info")
-
-    def open_scan_debug_folder(self):
-        """Open the debug folder for the current media analysis scan"""
-        if hasattr(self, 'current_scan_dir') and self.current_scan_dir:
-            try:
-                debug_dir = Path(self.current_scan_dir) / 'debug'
-                if not debug_dir.exists():
-                    debug_dir.mkdir(parents=True, exist_ok=True)
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(debug_dir)))
-            except Exception as e:
-                try:
-                    QMessageBox.warning(self, 'Debug Folder Error', f'Could not open debug folder:\n{e}')
-                except Exception:
-                    pass
-        else:
-            QMessageBox.information(self, 'Debug Folder', 'No folder selected yet for analysis.')
 
     def restore_account_name_field(self):
         """Restore last project name as plain text (no scrollable dropdown)."""
@@ -5087,7 +4665,6 @@ class DownloaderGUI(QMainWindow):
             self.dl_total_files = 0
             self._show_run_dashboard(reset=True)
             self.download_cancelled = False
-            self.download_scan_complete = False
             self.download_running = True
             self._refresh_after_processing_actions()
             self.download_btn.setText('Cancel')
@@ -5286,16 +4863,12 @@ class DownloaderGUI(QMainWindow):
                     pass
 
     def cancel_download(self):
-        """Cancel the running download/processing."""
+        """Cancel the running processing job."""
         try:
-            if hasattr(self, 'download_worker') and self.download_worker.isRunning():
-                self.download_cancelled = True
-                self.download_worker.cancel()
-                self._apply_status(self.status_label, '⏹ Cancelling download...', "warn")
-            elif hasattr(self, 'local_export_worker') and self.local_export_worker.isRunning():
+            if hasattr(self, 'local_export_worker') and self.local_export_worker.isRunning():
                 self.download_cancelled = True
                 self.local_export_worker.cancel()
-                self._apply_status(self.status_label, '⏹ Cancelling processing...', "warn")
+                self._apply_status(self.status_label, 'Cancelling processing...', "warn")
         except Exception:
             pass
 
@@ -5360,14 +4933,6 @@ class DownloaderGUI(QMainWindow):
         self.dark_mode_enabled = resolve_theme(mode) == THEME_DARK
         self._apply_current_theme()
 
-    def apply_dark_mode(self):
-        self.dark_mode_enabled = True
-        self._apply_current_theme()
-
-    def apply_light_mode(self):
-        self.dark_mode_enabled = False
-        self._apply_current_theme()
-        
     def update_title_bar_color(self, is_dark: bool):
         """
         Update Windows title bar color using DWM API.
@@ -5509,19 +5074,6 @@ class DownloaderGUI(QMainWindow):
                 self.fullscreen_popup.show_media(str(temp_path))
             except Exception as e:
                 QMessageBox.warning(self, 'Preview Error', f'Could not display example image:\n{str(e)}')
-
-    def check_updates_on_startup(self):
-        """Check for updates in background"""
-        try:
-            self.update_worker = UpdateWorker()
-            self.update_worker.update_available.connect(self.show_update_dialog)
-            self.update_worker.start()
-        except Exception:
-            pass
-
-    def on_update_available(self, info):
-        self.show_update_dialog(info)
-
 
 def _configure_webengine_storage() -> None:
     """Use a dedicated WebEngine profile so stray pythonw processes cannot deadlock startup."""
