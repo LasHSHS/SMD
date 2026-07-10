@@ -143,12 +143,16 @@ def check_staging_readiness(
     require_raw: bool = True,
     layout: AccountPaths | None = None,
     deep_video_check: bool = True,
+    video_check_limit: int | None = None,
 ) -> StagingReadinessReport:
     """
     Verify every staged memory has finished outputs before deleting staging/.
 
-    deep_video_check samples merged videos with ffprobe; disable only in tests
-    with synthetic media files.
+    deep_video_check runs an ffprobe stream-decode check on merged videos;
+    disable only in tests with synthetic media files. video_check_limit caps
+    how many videos are deep-checked (random sample) - None (default) checks
+    every video, since this is the gate before staging (the only re-source
+    for re-processing) is deleted.
     """
     paths = layout or resolve_account_paths(account_dir, migrate=False, create=False)
     issues: list[StagingCheckIssue] = []
@@ -406,30 +410,47 @@ def check_staging_readiness(
             )
         )
 
-    # Deep-check a sample of videos with ffprobe: header checks cannot detect
-    # truncated streams, and staging is the only source to reprocess from.
+    # Deep-check videos with ffprobe: header/size checks cannot detect
+    # truncated or corrupt streams, and staging is the only source to
+    # reprocess from once it is deleted. By default every video is checked
+    # (not just a sample), run in parallel since ffprobe is I/O-bound.
     if video_paths and deep_video_check:
+        import os as _os
         import random
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         from smd.procutil import ffprobe_stream_ok
 
-        sample = video_paths if len(video_paths) <= 25 else random.sample(video_paths, 25)
+        if video_check_limit is not None and len(video_paths) > video_check_limit:
+            sample = random.sample(video_paths, video_check_limit)
+        else:
+            sample = video_paths
+
         bad_videos = []
-        for vp in sample:
-            verdict = ffprobe_stream_ok(vp)
-            if verdict is False:
-                bad_videos.append(vp.name)
+        max_workers = min(8, max(2, _os.cpu_count() or 4))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(ffprobe_stream_ok, vp): vp for vp in sample}
+            for fut in as_completed(futures):
+                vp = futures[fut]
+                try:
+                    verdict = fut.result()
+                except Exception:
+                    verdict = None
+                if verdict is False:
+                    bad_videos.append(vp.name)
+
         if bad_videos:
+            scope = "all" if sample is video_paths else f"{len(sample)} sampled"
             issues.append(
                 StagingCheckIssue(
                     code="corrupt_video_stream",
                     severity="error",
                     message=(
-                        f"{len(bad_videos)} of {len(sample)} sampled videos failed a deep "
+                        f"{len(bad_videos)} of {scope} videos failed a deep "
                         f"ffprobe check (e.g. {bad_videos[0]}). Re-run processing before "
                         "deleting staging."
                     ),
-                    stems=bad_videos[:20],
+                    stems=sorted(bad_videos)[:20],
                 )
             )
 
