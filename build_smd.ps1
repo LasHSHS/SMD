@@ -45,10 +45,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Ensure ffmpeg is reachable next to smd.exe (all-in-one layout)
-$distFfmpeg = Join-Path 'dist\smd\tools\ffmpeg'
+$distFfmpeg = Join-Path 'dist\smd' 'tools\ffmpeg'
 New-Item -ItemType Directory -Force -Path $distFfmpeg | Out-Null
 Copy-Item -Path 'tools\ffmpeg\*' -Destination $distFfmpeg -Force -ErrorAction SilentlyContinue
-$internalFfmpeg = Join-Path 'dist\smd\_internal\tools\ffmpeg'
+$internalFfmpeg = Join-Path 'dist\smd\_internal' 'tools\ffmpeg'
 if (Test-Path 'dist\smd\_internal') {
     New-Item -ItemType Directory -Force -Path $internalFfmpeg | Out-Null
     Copy-Item -Path 'tools\ffmpeg\*' -Destination $internalFfmpeg -Force -ErrorAction SilentlyContinue
