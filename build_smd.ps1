@@ -54,5 +54,9 @@ if (Test-Path 'dist\smd\_internal') {
     Copy-Item -Path 'tools\ffmpeg\*' -Destination $internalFfmpeg -Force -ErrorAction SilentlyContinue
 }
 
+# Runtime logs from smoke-testing must never ship in a packaged build.
+Get-ChildItem -Path 'dist\smd' -Recurse -Filter '*.log' -File -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+
 Write-Host "[SMD Build] Done. All-in-one package: .\dist\smd\SMD.exe" -ForegroundColor Green
 Write-Host "[SMD Build] Optional installer: compile smd_installer.iss with Inno Setup" -ForegroundColor Cyan

@@ -19,8 +19,16 @@ import os
 # Redirect both streams to smd_gui.log (or a null sink) as the very first thing.
 if sys.stdout is None or sys.stderr is None:
     try:
+        # When frozen (PyInstaller), __file__ resolves inside _internal/, which
+        # is regenerated wholesale on every build - write next to the exe
+        # instead so runtime logs never get swept into a packaged build.
+        _log_dir = (
+            os.path.dirname(os.path.abspath(sys.executable))
+            if getattr(sys, 'frozen', False)
+            else os.path.dirname(os.path.abspath(__file__))
+        )
         _early_log = open(
-            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'smd_gui.log'),
+            os.path.join(_log_dir, 'smd_gui.log'),
             'a', encoding='utf-8', buffering=1,
         )
     except OSError:
@@ -72,7 +80,9 @@ import tempfile
 from smd.grip_splitter import ResultsGripSplitter
 from PyQt5.QtCore import QSize
 
-ROOT = Path(__file__).parent
+# When frozen (PyInstaller), __file__ resolves inside _internal/, which is
+# regenerated wholesale on every build - use the exe's own directory instead.
+ROOT = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
 
 
 def _doc_browser_anchor_clicked(browser: QTextBrowser, url: QUrl) -> None:
