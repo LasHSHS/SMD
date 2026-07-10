@@ -155,26 +155,42 @@ def friendly_error_message(error_obj):
         return f"An unexpected error occurred. Please try again. If this persists, contact support."
 
 
-class StreamRedirector:
-    """Redirect stdout/stderr lines into the GUI debug console."""
+class StreamRedirector(QObject):
+    """Redirect stdout/stderr lines into the GUI debug console.
+
+    write() may be called from any thread (workers use print()), so lines are
+    delivered through a queued Qt signal instead of touching widgets directly.
+    """
+
+    line_written = pyqtSignal(str)
 
     def __init__(self, callback):
-        self._callback = callback
+        super().__init__()
+        import threading
+
+        self._lock = threading.Lock()
         self._buffer = ""
+        # Queued connection: slot always runs on the GUI thread.
+        self.line_written.connect(callback, Qt.QueuedConnection)
 
     def write(self, text: str) -> None:
         if not text:
             return
-        self._buffer += text
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
-            if line:
-                self._callback(line.rstrip())
+        lines = []
+        with self._lock:
+            self._buffer += text
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                if line:
+                    lines.append(line.rstrip())
+        for line in lines:
+            self.line_written.emit(line)
 
     def flush(self) -> None:
-        if self._buffer:
-            self._callback(self._buffer.rstrip())
-            self._buffer = ""
+        with self._lock:
+            pending, self._buffer = self._buffer, ""
+        if pending:
+            self.line_written.emit(pending.rstrip())
 
     def isatty(self) -> bool:
         return False
@@ -812,7 +828,6 @@ class MapRenderWorker(QThread):
             from collections import defaultdict
             
             self.progress.emit(5, 'Building marker groups...')
-            QApplication.processEvents()
             
             try:
                 # Find the latest file to center map
@@ -825,7 +840,6 @@ class MapRenderWorker(QThread):
                 center_lat, center_lon = 39.8283, -98.5795
             
             self.progress.emit(10, 'Creating base map...')
-            QApplication.processEvents()
             
             try:
                 dark = bool(getattr(self.parent_gui, 'dark_mode_enabled', False))
@@ -843,7 +857,6 @@ class MapRenderWorker(QThread):
             # Create marker cluster
             try:
                 self.progress.emit(25, '📍 Creating marker cluster...')
-                QApplication.processEvents()
                 marker_cluster = MarkerCluster(
                     name='Photos/Videos',
                     overlay=True,
@@ -858,7 +871,6 @@ class MapRenderWorker(QThread):
             # Group locations by coordinates
             try:
                 self.progress.emit(30, '🧮 Grouping locations...')
-                QApplication.processEvents()
                 grouped_locations = defaultdict(list)
                 for loc in self.locations:
                     try:
@@ -888,7 +900,6 @@ class MapRenderWorker(QThread):
                     current_group += 1
                     progress_val = 30 + int((current_group / total_groups) * 60)
                     self.progress.emit(progress_val, f'📌 Adding markers ({current_group}/{total_groups})...')
-                    QApplication.processEvents()
                     
                     primary_loc = loc_group[0]
                     
@@ -983,7 +994,6 @@ class MapRenderWorker(QThread):
             
             try:
                 self.progress.emit(92, '🔗 Adding layer controls...')
-                QApplication.processEvents()
                 folium.LayerControl().add_to(m)
             except Exception as e:
                 print(f"DEBUG: Error adding layer controls: {e}")
@@ -991,7 +1001,6 @@ class MapRenderWorker(QThread):
             
             try:
                 self.progress.emit(95, 'Generating HTML...')
-                QApplication.processEvents()
                 
                 # Add JavaScript with file data
                 all_files_json_str = json.dumps(all_files_json)
@@ -1034,7 +1043,6 @@ class MapRenderWorker(QThread):
             try:
                 # Save map to file
                 self.progress.emit(98, 'Saving map file...')
-                QApplication.processEvents()
                 temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.html', mode='w', encoding='utf-8')
                 temp_path = temp_file.name
                 temp_file.close()
@@ -1085,7 +1093,6 @@ class MapRenderWorker(QThread):
                     print(f"WARNING: Could not inject auto-open JavaScript: {inject_err}")
                 
                 self.progress.emit(100, 'Map rendered!')
-                QApplication.processEvents()
                 self.finished.emit(temp_path)
             except Exception as save_err:
                 print(f"DEBUG: Error saving map: {save_err}")
@@ -3750,6 +3757,7 @@ class DownloaderGUI(QMainWindow):
             return
         self.verify_staging_btn.setEnabled(False)
         self._apply_status(self.status_label, 'Verifying staging folder…', 'info')
+        self._stop_worker('staging_check_worker')
         self.staging_check_worker = StagingCheckWorker(
             self._account_paths(account_name).account_dir
         )
@@ -4076,6 +4084,7 @@ class DownloaderGUI(QMainWindow):
         self.processing_speeds = []
         self.current_file_being_processed = ''
 
+        self._stop_worker('map_worker')
         self.map_worker = MapWorker(
             self.selected_scan,
             self,
@@ -4192,6 +4201,7 @@ class DownloaderGUI(QMainWindow):
             self.start_status_animation('Rendering map with markers...')
             self._last_map_locations = locations
 
+            self._stop_worker('map_render_worker')
             self.map_render_worker = MapRenderWorker(locations, self)
             self.map_render_worker.progress.connect(self.on_map_render_progress)
             self.map_render_worker.finished.connect(self.on_map_render_finished)
@@ -4232,9 +4242,20 @@ class DownloaderGUI(QMainWindow):
                 self.operation_start_time = datetime.now()
     
     def cancel_map_scan(self):
-        """Cancel ongoing map scan"""
-        if hasattr(self, 'map_worker') and self.map_worker.isRunning():
-            self.map_worker.cancelled = True
+        """Cancel every stage of the check-folder workflow (rename, scan, render)."""
+        cancelled_any = False
+        for attr in ('scan_worker', 'map_worker', 'map_render_worker'):
+            worker = getattr(self, attr, None)
+            try:
+                if worker is not None and worker.isRunning():
+                    if hasattr(worker, 'cancel'):
+                        worker.cancel()
+                    else:
+                        worker.cancelled = True
+                    cancelled_any = True
+            except RuntimeError:
+                pass
+        if cancelled_any:
             self.stop_status_animation()
             self._apply_status(self.unified_status, 'Cancelling scan...', "warn")
     
@@ -4527,6 +4548,7 @@ class DownloaderGUI(QMainWindow):
         self.unified_progress.setValue(0)
         self._apply_status(self.unified_status, 'Step 1/3: Fixing file extensions...', 'info')
 
+        self._stop_worker('scan_worker')
         self.scan_worker = ScanWorker(self.selected_scan, dry_run=False)
         self.scan_worker.output.connect(self.on_scan_output)
         self.scan_worker.finished.connect(self.on_scan_finished_in_full_workflow)
@@ -4573,6 +4595,7 @@ class DownloaderGUI(QMainWindow):
             self.unified_progress.setValue(50)
             self.start_status_animation('Rendering map with markers...')
             self._last_map_locations = gps_data
+            self._stop_worker('map_render_worker')
             self.map_render_worker = MapRenderWorker(gps_data, self)
             self.map_render_worker.progress.connect(self.on_map_render_progress)
             self.map_render_worker.finished.connect(self.on_map_render_finished)
@@ -4872,6 +4895,29 @@ class DownloaderGUI(QMainWindow):
         except Exception:
             pass
 
+    def _stop_worker(self, attr: str, timeout_ms: int = 3000) -> None:
+        """Stop and detach a previous QThread worker before starting a replacement.
+
+        Prevents stale threads from emitting into shared slots (double map
+        renders, crossed progress updates) and shutdown crashes.
+        """
+        worker = getattr(self, attr, None)
+        if worker is None:
+            return
+        try:
+            if worker.isRunning():
+                if hasattr(worker, 'cancel'):
+                    worker.cancel()
+                elif hasattr(worker, 'cancelled'):
+                    worker.cancelled = True
+                worker.wait(timeout_ms)
+            try:
+                worker.disconnect()
+            except TypeError:
+                pass
+        except RuntimeError:
+            pass  # C++ object already deleted
+
     def on_download_button_clicked(self):
         """Unified Start/Cancel behavior on single button."""
         if not self.download_running:
@@ -4972,6 +5018,7 @@ class DownloaderGUI(QMainWindow):
             worker = getattr(self, 'map_render_worker', None)
             if worker is not None and worker.isRunning():
                 return
+            self._stop_worker('map_render_worker')
             self.map_render_worker = MapRenderWorker(locations, self)
             self.map_render_worker.finished.connect(self.on_map_render_finished)
             self.map_render_worker.error.connect(self.on_map_render_error)
