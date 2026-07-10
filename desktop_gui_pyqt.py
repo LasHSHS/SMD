@@ -1857,7 +1857,7 @@ class DuplicateReviewDialog(QDialog):
             'Some files in your library are byte-for-byte identical. '
             'Tick the copy (or copies) you want to keep in each group - use "Keep both" '
             'to keep all of them. When you apply, the copies you did not tick are '
-            'permanently deleted from your library. This cannot be undone.'
+            'permanently deleted from both your merged and raw folders. This cannot be undone.'
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
@@ -2051,11 +2051,19 @@ class DuplicateReviewDialog(QDialog):
             )
             return
 
+        # Delete each non-keeper from every folder it lives in (merged + raw
+        # share the same filename per item), not a separate review folder.
+        target_folders: list[tuple[str, Path]] = [('merged', self.paths.merged_dir)]
+        raw_dir = getattr(self.paths, 'raw_dir', None)
+        if raw_dir is not None:
+            target_folders.append(('raw', raw_dir))
+        folder_names = ' and '.join(label for label, _ in target_folders)
+
         confirm = QMessageBox.question(
             self,
             'Permanently delete duplicates?',
-            f'{len(to_delete)} unselected file(s) will be permanently deleted from '
-            f'your library:\n{self.paths.merged_dir}\n\n'
+            f'{len(to_delete)} unselected duplicate(s) will be permanently deleted '
+            f'from your {folder_names} folder(s).\n\n'
             f'This cannot be undone. Continue?',
             QMessageBox.Yes | QMessageBox.Cancel,
             QMessageBox.Cancel,
@@ -2067,20 +2075,21 @@ class DuplicateReviewDialog(QDialog):
         deleted_files: list[str] = []
         errors: list[str] = []
         for name in to_delete:
-            src = self.paths.merged_dir / name
-            try:
-                if src.is_file():
-                    src.unlink()
-                    deleted += 1
-                    deleted_files.append(name)
-            except OSError as exc:
-                errors.append(f'{name}: {exc}')
+            for label, folder in target_folders:
+                p = folder / name
+                try:
+                    if p.is_file():
+                        p.unlink()
+                        deleted += 1
+                        deleted_files.append(f'{label}/{name}')
+                except OSError as exc:
+                    errors.append(f'{label}/{name}: {exc}')
 
         ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
         selection_report = {
             'generated_at_utc': datetime.utcnow().isoformat() + 'Z',
             'account_name': self.account_name,
-            'source_folder': str(self.paths.merged_dir),
+            'source_folders': [str(folder) for _, folder in target_folders],
             'action': 'permanent_delete',
             'deleted_count': deleted,
             'group_selections': group_selections,
@@ -2959,7 +2968,7 @@ class DownloaderGUI(QMainWindow):
         self.review_duplicates_btn.setObjectName('toolbarBtn')
         self.review_duplicates_btn.setToolTip(
             'Scan merged/ for byte-identical duplicates, tick the copies to keep per group, '
-            'then permanently delete the ones you did not keep.'
+            'then permanently delete the ones you did not keep (from both merged/ and raw/).'
         )
         self.review_duplicates_btn.clicked.connect(self.review_duplicates)
 
@@ -5060,27 +5069,6 @@ class DownloaderGUI(QMainWindow):
         except Exception as e:
             print(f"Failed to set title bar color: {e}")
 
-    def _refresh_map_for_theme(self) -> None:
-        """Re-render the map when switching light/dark so basemap tiles match the UI theme."""
-        locations = getattr(self, '_last_map_locations', None)
-        if locations:
-            worker = getattr(self, 'map_render_worker', None)
-            if worker is not None and worker.isRunning():
-                return
-            self._stop_worker('map_render_worker')
-            self.map_render_worker = MapRenderWorker(
-                locations,
-                dark_mode=bool(getattr(self, 'dark_mode_enabled', False)),
-            )
-            self.map_render_worker.finished.connect(self.on_map_render_finished)
-            self.map_render_worker.error.connect(self.on_map_render_error)
-            self.map_render_worker.start()
-            return
-        try:
-            self.init_default_map()
-        except Exception:
-            pass
-
     def toggle_dark_mode(self):
         from smd.theme import THEME_DARK, THEME_LIGHT
 
@@ -5089,7 +5077,10 @@ class DownloaderGUI(QMainWindow):
             'theme_mode', THEME_DARK if self.dark_mode_enabled else THEME_LIGHT
         )
         self._apply_current_theme()
-        self._refresh_map_for_theme()
+        # Intentionally do NOT re-render the map here. Toggling the app theme
+        # should only restyle the UI chrome; re-rendering was expensive
+        # (regenerated all thumbnails) and reset the user's pan/zoom. The map
+        # picks up the current theme the next time it is loaded.
 
     def _show_completion_summary(self) -> None:
         """Build and show the post-run summary. Always gives feedback and always
