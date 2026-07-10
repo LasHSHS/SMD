@@ -4920,11 +4920,21 @@ class DownloaderGUI(QMainWindow):
                 self._apply_status(self.status_label, '⏹ Stopped. Click Start to resume with the same account name.', "warn")
             else:
                 tail = '\n'.join(self.download_log_lines[-12:]) if self.download_log_lines else 'No output was captured.'
+                tail_low = tail.lower()
                 title = 'Processing Failed'
 
-                if 'permission' in tail.lower():
+                if 'no space left' in tail_low or 'errno 28' in tail_low:
+                    title = 'Out of disk space'
+                    error_msg = (
+                        'Your disk ran out of space while processing.\n\n'
+                        'Free up space on the output drive - merged/, raw/, and '
+                        'technical/staging/ can be very large for big exports - then click '
+                        'Start again with the same project name. SMD resumes where it left '
+                        'off and only processes the files that remain.'
+                    )
+                elif 'permission' in tail_low:
                     error_msg = 'The app does not have permission to access that folder.\n\nCheck Windows security settings and try again.'
-                elif 'no module' in tail.lower() or 'local_pipeline' in tail.lower():
+                elif 'no module named' in tail_low or 'cannot import name' in tail_low:
                     error_msg = (
                         'Processing is not available in this copy of SMD.\n\n'
                         'Please install the latest version of Snapchat Memories Downloader.'
