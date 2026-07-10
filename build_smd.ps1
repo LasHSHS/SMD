@@ -11,7 +11,7 @@ if (-not (Test-Path ".\.venv\Scripts\Activate.ps1")) {
 
 Write-Host "[SMD Build] Ensuring PyInstaller and hooks are available" -ForegroundColor Cyan
 python -m pip install --upgrade pip
-pip install pyinstaller psutil PyQt5 PyQtWebEngine mutagen timezonefinder pytz httpx tqdm exif Pillow folium
+pip install pyinstaller -r requirements.txt
 Write-Host "[SMD Build] Dependencies installed" -ForegroundColor Green
 
 Write-Host "[SMD Build] Ensuring bundled ffmpeg (all-in-one package)" -ForegroundColor Cyan

@@ -13,9 +13,19 @@ dist/
 
 accounts/
 downloads/
+merged/
+raw/
 json/
 *.zip
 technical/staging/
+
+# Build/installer artifacts and downloaded tools (never commit these)
+installer_output/
+inno-setup.exe
+
+# ExifTool is no longer used by the app; do not track it
+tools/exiftool.exe
+tools/exiftool_files/
 
 # Logs and local traces
 *.log

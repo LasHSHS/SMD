@@ -1,0 +1,72 @@
+SMD - Snapchat Memories Downloader
+Copyright (C) 2026 Las HS (https://las-hs.com)
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU General Public License version 3 as published
+by the Free Software Foundation. See the LICENSE file for the full text.
+
+SMD is not affiliated with, endorsed by, or sponsored by Snap Inc.
+"Snapchat" is a trademark of Snap Inc.
+
+--------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------
+
+This software uses and/or bundles the following third-party components.
+Each remains under its own license; the notices below are provided for
+attribution and license compliance.
+
+FFmpeg / ffprobe
+  Website: https://ffmpeg.org
+  License: LGPL v2.1+ (some builds GPL). The official SMD build bundles
+  FFmpeg binaries fetched at build time (see scripts/fetch_ffmpeg.ps1).
+  FFmpeg is a trademark of Fabrice Bellard. Source for the exact FFmpeg
+  build used is available from the FFmpeg project.
+
+PyQt5 and PyQtWebEngine
+  Author: Riverbank Computing Limited
+  License: GPL v3 (also available under a commercial license).
+  Qt itself is Copyright (C) The Qt Company Ltd.
+
+Pillow (PIL fork)
+  License: MIT-CMU (HPND).
+  Copyright (C) Jeffrey A. Clark and contributors.
+
+mutagen
+  License: GPL v2+.
+  Copyright (C) the mutagen contributors.
+
+exif
+  License: MIT.
+  Copyright (C) Tyler N. Thieding.
+
+folium
+  License: MIT.
+  Copyright (C) the folium contributors.
+  Map tiles (e.g. OpenStreetMap) are (C) their respective providers and
+  are only requested when the GPS map view is opened.
+
+timezonefinder
+  License: MIT.
+  Copyright (C) Jannik Michelfeit.
+
+pytz
+  License: MIT.
+  Copyright (C) Stuart Bishop.
+
+psutil
+  License: BSD 3-Clause.
+  Copyright (C) Giampaolo Rodola.
+
+pydantic
+  License: MIT.
+  Copyright (C) Samuel Colvin and contributors.
+
+packaging
+  License: Apache-2.0 / BSD-2-Clause.
+  Copyright (C) Donald Stufft and individual contributors.
+
+--------------------------------------------------------------------------
+Full license texts for the above components are available from their
+respective project websites. The GPL-licensed components (PyQt5, mutagen,
+and this application) are covered by the GNU GPL v3 in the LICENSE file.

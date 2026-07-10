@@ -104,6 +104,20 @@ def _memory_type_key(memory: Memory) -> str:
     return "image"
 
 
+_MID_RE = re.compile(r"[?&]mid=([^&]+)", re.I)
+
+
+def _memory_media_id(memory: Memory) -> str | None:
+    """Snapchat media id (mid=) from export JSON URLs."""
+    for url in (memory.download_link, memory.media_download_url or ""):
+        if not url:
+            continue
+        match = _MID_RE.search(url)
+        if match:
+            return match.group(1).lower()
+    return None
+
+
 def build_deterministic_match_map(
     items: dict[str, BundledMediaItem],
     memories: list[Memory],
@@ -134,6 +148,43 @@ def build_deterministic_match_map(
         mem_list = mem_groups.get(key, [])
         for i, (stem, _) in enumerate(item_list):
             match_map[stem] = mem_list[i] if i < len(mem_list) else None
+    return match_map
+
+
+def build_match_map(
+    items: dict[str, BundledMediaItem],
+    memories: list[Memory],
+) -> dict[str, Memory | None]:
+    """Match bundled files to JSON rows by Snapchat media id when possible."""
+    match_map: dict[str, Memory | None] = {
+        stem: None for stem, item in items.items() if item.main_path
+    }
+    mid_index: dict[str, Memory] = {}
+    for mem in memories:
+        mid = _memory_media_id(mem)
+        if mid and mid not in mid_index:
+            mid_index[mid] = mem
+
+    used: set[int] = set()
+    unmatched_stems: list[str] = []
+    for stem, item in items.items():
+        if not item.main_path:
+            continue
+        uid = item.uid.lower()
+        mem = mid_index.get(uid)
+        if mem is not None and id(mem) not in used:
+            match_map[stem] = mem
+            used.add(id(mem))
+        else:
+            unmatched_stems.append(stem)
+
+    if unmatched_stems:
+        unmatched_items = {s: items[s] for s in unmatched_stems}
+        remaining = [m for m in memories if id(m) not in used]
+        fallback = build_deterministic_match_map(unmatched_items, remaining)
+        for stem, mem in fallback.items():
+            match_map[stem] = mem
+
     return match_map
 
 
@@ -852,7 +903,7 @@ def process_bundled_export(
         status,
         legacy_staging_dir=paths.downloads_dir / LEGACY_STAGING,
     )
-    match_map = build_deterministic_match_map(items, memories)
+    match_map = build_match_map(items, memories)
     matched_count = sum(1 for v in match_map.values() if v is not None)
     status(f"Matched {matched_count}/{len(match_map)} files to JSON metadata.")
 

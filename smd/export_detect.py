@@ -1,4 +1,4 @@
-"""Detect Snapchat export format (CDN links vs bundled local media)."""
+"""Detect Snapchat export format (bundled local media vs unsupported link-only)."""
 from __future__ import annotations
 
 import json
@@ -10,8 +10,9 @@ from pathlib import Path
 
 
 class ExportFormat(str, Enum):
-    CDN_LINKS = "cdn_links"
     BUNDLED_LOCAL = "bundled_local"
+    LINKS_ONLY = "links_only"
+    JSON_ONLY = "json_only"
     EMPTY = "empty"
 
 
@@ -31,6 +32,10 @@ class ExportAnalysis:
     @property
     def is_bundled(self) -> bool:
         return self.format == ExportFormat.BUNDLED_LOCAL
+
+    @property
+    def is_supported(self) -> bool:
+        return self.is_bundled
 
     @property
     def has_links(self) -> bool:
@@ -58,8 +63,8 @@ def discover_export_zip_parts(seed: Path) -> list[Path]:
     """Find all parts of a split Snapchat export (mydata~ID.zip, mydata~ID-2.zip, ...)."""
     seed = seed.resolve()
     if seed.is_dir():
-        zips = sorted(seed.glob("mydata*.zip"))
-        return zips if zips else sorted(seed.glob("*.zip"))
+        zips = sorted(seed.glob("mydata*.zip"), key=_zip_sort_key)
+        return zips if zips else sorted(seed.glob("*.zip"), key=_zip_sort_key)
 
     if not seed.suffix.lower() == ".zip":
         return []
@@ -99,8 +104,11 @@ def export_base_ids(zip_paths: list[Path]) -> set[str]:
 
 
 def _zip_sort_key(p: Path) -> tuple:
+    # Base part (mydata~ID.zip) sorts before numbered parts (…-2.zip, …-3.zip);
+    # lowercase name is a stable tiebreaker so generic *.zip lists stay ordered.
     m = re.search(r"-(\d+)\.zip$", p.name, re.I)
-    return (0, 0) if m is None else (1, int(m.group(1)))
+    order = (0, 0) if m is None else (1, int(m.group(1)))
+    return (*order, p.name.lower())
 
 
 def analyze_zip_export(seed_path: Path | list[Path]) -> ExportAnalysis:
@@ -146,18 +154,24 @@ def analyze_zip_export(seed_path: Path | list[Path]) -> ExportAnalysis:
     if json_rows == 0:
         fmt = ExportFormat.EMPTY
         msg = "No memories_history.json found in export."
-    elif rows_with_link > 0:
-        fmt = ExportFormat.CDN_LINKS
-        msg = f"CDN export: {rows_with_link} download links in JSON."
     elif main_count > 0 or embedded > 0:
         fmt = ExportFormat.BUNDLED_LOCAL
         msg = (
             f"Bundled export: {main_count} main files across {len(zip_paths)} ZIP(s), "
-            f"{json_rows} JSON rows, no download links."
+            f"{json_rows} JSON rows. Processing is fully offline."
+        )
+    elif rows_with_link > 0:
+        fmt = ExportFormat.LINKS_ONLY
+        msg = (
+            f"Link-only export: {rows_with_link} JSON rows with download URLs, "
+            "but no media files inside the ZIP. SMD only supports bundled exports."
         )
     else:
-        fmt = ExportFormat.CDN_LINKS
-        msg = f"JSON-only export ({json_rows} rows). Will try CDN download."
+        fmt = ExportFormat.JSON_ONLY
+        msg = (
+            f"JSON-only export ({json_rows} rows). No bundled media files in the ZIP. "
+            "Request a new Snapchat export with memories included."
+        )
 
     return ExportAnalysis(
         format=fmt,

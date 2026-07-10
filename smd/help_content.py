@@ -310,8 +310,9 @@ def build_help_html(process_tab_name: str = "Save memories") -> str:
                 ),
                 (
                     "Review duplicates (optional)",
-                    "Scans for byte-identical files. Pick keepers; non-keepers copy to "
-                    "<code>duplicates_selected_&lt;timestamp&gt;/</code> beside your library - merged folder is untouched.",
+                    "Scans for byte-identical files. Tick the copies to keep in each group "
+                    "(or Keep both); the ones you do not keep are permanently deleted. A JSON "
+                    "record of what was removed is saved in <code>technical/reports/</code>.",
                 ),
                 (
                     "Verify staging + delete (Technical view)",

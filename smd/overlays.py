@@ -9,21 +9,12 @@ from pathlib import Path
 from PIL import Image
 
 from smd.ffmpeg_bundle import resolve_ffmpeg
+from smd.procutil import subprocess_flags as _subprocess_flags
 
 # Maximum practical quality for export outputs
 JPEG_QUALITY = 100
 # x264 CRF 0 = lossless (large files); use 1 for near-lossless if size explodes
 VIDEO_CRF = 0
-
-
-def _subprocess_flags():
-    startupinfo = None
-    creationflags = 0
-    if sys.platform.startswith("win"):
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        creationflags = subprocess.CREATE_NO_WINDOW
-    return startupinfo, creationflags
 
 
 def merge_image_overlay(main_path: Path, overlay_path: Path, output_path: Path) -> bool:

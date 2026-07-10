@@ -8,16 +8,7 @@ from pathlib import Path
 
 from smd.utils import detect_ext_from_bytes
 from smd.ffmpeg_bundle import resolve_ffmpeg
-
-
-def _subprocess_flags():
-    startupinfo = None
-    creationflags = 0
-    if sys.platform.startswith("win"):
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        creationflags = subprocess.CREATE_NO_WINDOW
-    return startupinfo, creationflags
+from smd.procutil import subprocess_flags as _subprocess_flags
 
 
 def is_likely_corrupt_video(path: Path, min_bytes: int = 1024) -> bool:

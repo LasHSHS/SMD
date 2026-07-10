@@ -225,17 +225,28 @@ class FlowDocBrowser(DocBrowser):
         super().__init__(parent)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self._syncing_height = False
         self.document().contentsChanged.connect(self._sync_height)
         QTimer.singleShot(0, self._sync_height)
 
     def _sync_height(self) -> None:
-        width = self.viewport().width()
-        if width > 0:
-            self.document().setTextWidth(width)
-        margin = self.document().documentMargin()
-        height = int(self.document().size().height()) + margin * 2 + 4
-        self.setMinimumHeight(height)
-        self.setMaximumHeight(height)
+        # Guard: setTextWidth fires contentsChanged and setMin/MaxHeight fires
+        # resizeEvent, both of which land back here - unguarded this recurses
+        # until the C stack overflows (Windows fail-fast 0xC0000409).
+        if self._syncing_height:
+            return
+        self._syncing_height = True
+        try:
+            width = self.viewport().width()
+            if width > 0 and self.document().textWidth() != width:
+                self.document().setTextWidth(width)
+            margin = self.document().documentMargin()
+            height = int(self.document().size().height()) + int(margin * 2) + 4
+            if self.minimumHeight() != height or self.maximumHeight() != height:
+                self.setMinimumHeight(height)
+                self.setMaximumHeight(height)
+        finally:
+            self._syncing_height = False
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -812,16 +823,94 @@ def _create_themed_map(
     return m
 
 
+def generate_thumbnail_base64(media_path, max_size=150):
+    """Base64 thumbnail for map popups (photo or video). Thread-safe:
+    pure PIL/ffmpeg, no Qt objects, unique temp files per call."""
+    path = Path(media_path)
+    try:
+        if path.suffix.lower() in ('.mp4', '.mov', '.m4v', '.mkv', '.avi'):
+            return _video_frame_thumbnail_b64(path, max_size)
+        img = Image.open(path)
+        if img.mode in ('RGBA', 'LA', 'P'):
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            if img.mode in ('RGBA', 'LA'):
+                background.paste(img, mask=img.split()[-1])
+                img = background
+        img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        import io
+        buffer = io.BytesIO()
+        img.save(buffer, format='JPEG', quality=90)
+        img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        return f"data:image/jpeg;base64,{img_base64}"
+    except Exception:
+        return None
+
+
+def _video_frame_thumbnail_b64(video_path: Path, max_size: int = 150):
+    """Extract one frame with ffmpeg for map popup."""
+    import uuid
+
+    from smd.ffmpeg_bundle import resolve_ffmpeg
+    ffmpeg = resolve_ffmpeg()
+    if not ffmpeg:
+        return None
+    tmp = Path(tempfile.gettempdir()) / f"smd_thumb_{uuid.uuid4().hex[:12]}.jpg"
+    try:
+        startupinfo = None
+        creationflags = 0
+        if sys.platform.startswith('win'):
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            creationflags = subprocess.CREATE_NO_WINDOW
+        subprocess.run(
+            [
+                ffmpeg, '-nostdin', '-y', '-ss', '0.5', '-i', str(video_path),
+                '-vframes', '1', '-q:v', '2', str(tmp),
+            ],
+            capture_output=True,
+            timeout=15,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+            check=False,
+        )
+        if not tmp.is_file() or tmp.stat().st_size < 100:
+            return None
+        img = Image.open(tmp)
+        img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        import io
+        buffer = io.BytesIO()
+        img.convert('RGB').save(buffer, format='JPEG', quality=90)
+        return f"data:image/jpeg;base64,{base64.b64encode(buffer.getvalue()).decode('utf-8')}"
+    except Exception:
+        return None
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 class MapRenderWorker(QThread):
     """Background thread for rendering folium map (non-blocking)"""
     progress = pyqtSignal(int, str)  # progress_percent, status_text
     finished = pyqtSignal(str)  # html_file_path
     error = pyqtSignal(str)
     
-    def __init__(self, locations, parent_gui):
+    def __init__(self, locations, *, thumbnails=None, dark_mode=False):
         super().__init__()
         self.locations = locations
-        self.parent_gui = parent_gui
+        self.thumbnails = thumbnails or {}
+        self.dark_mode = dark_mode
+
+    def _thumbnail_for(self, full_path: str):
+        """Cached thumbnail lookup; generates in this worker thread on miss."""
+        if full_path in self.thumbnails:
+            return self.thumbnails[full_path]
+        b64 = generate_thumbnail_base64(full_path)
+        self.thumbnails[full_path] = b64
+        return b64
     
     def run(self):
         try:
@@ -842,7 +931,7 @@ class MapRenderWorker(QThread):
             self.progress.emit(10, 'Creating base map...')
             
             try:
-                dark = bool(getattr(self.parent_gui, 'dark_mode_enabled', False))
+                dark = bool(self.dark_mode)
                 m = _create_themed_map(
                     [center_lat, center_lon],
                     8,
@@ -903,11 +992,11 @@ class MapRenderWorker(QThread):
                     
                     primary_loc = loc_group[0]
                     
-                    # Generate thumbnail (images and videos)
+                    # Thumbnails generated here in the worker thread (pure PIL/ffmpeg, no Qt).
                     thumbnail_b64 = None
                     for loc in loc_group:
                         try:
-                            thumbnail_b64 = self.parent_gui.generate_thumbnail_base64(loc['full_path'])
+                            thumbnail_b64 = self._thumbnail_for(loc['full_path'])
                             if thumbnail_b64:
                                 break
                         except Exception as thumb_err:
@@ -1342,7 +1431,7 @@ class MapWorker(QThread):
             
             # Adaptive threading from system profile (GPS scan)
             cpu_count = os.cpu_count() or 2
-            perf_mode = getattr(self.parent_gui, 'performance_mode', 'maximum')
+            perf_mode = getattr(self.parent_gui, 'performance_mode', 'balanced')
             from smd.system_profile import compute_workers, get_system_profile
 
             settings = compute_workers(perf_mode, get_system_profile(), task="gps")
@@ -1754,7 +1843,6 @@ class DuplicateReviewDialog(QDialog):
         self.report = report
         self._dark = dark
         self._group_ui: list[tuple[str, list, QButtonGroup]] = []
-        self._keep_both_groups: set[str] = set()
 
         self.setWindowTitle('Review duplicates - choose keepers')
         self.setMinimumWidth(960)
@@ -1767,8 +1855,9 @@ class DuplicateReviewDialog(QDialog):
 
         intro = QLabel(
             'Some files in your library are byte-for-byte identical. '
-            'For each group, pick which copy to keep (or choose Keep both). '
-            'SMD can copy the extras to a review folder — your main library is not changed.'
+            'Tick the copy (or copies) you want to keep in each group - use "Keep both" '
+            'to keep all of them. When you apply, the copies you did not tick are '
+            'permanently deleted from your library. This cannot be undone.'
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
@@ -1800,7 +1889,7 @@ class DuplicateReviewDialog(QDialog):
             box_layout.setContentsMargins(10, 10, 10, 10)
 
             btn_group = QButtonGroup(box)
-            btn_group.setExclusive(True)
+            btn_group.setExclusive(False)
 
             cards_row = QHBoxLayout()
             cards_row.setSpacing(12)
@@ -1826,7 +1915,7 @@ class DuplicateReviewDialog(QDialog):
             )
             keep_both_btn = QPushButton('Keep both')
             keep_both_btn.setObjectName('toolbarBtn')
-            keep_both_btn.setToolTip('Leave every file in this group in your library (no copies moved)')
+            keep_both_btn.setToolTip('Keep every file in this group (nothing in it will be deleted)')
             keep_both_btn.clicked.connect(
                 lambda _checked=False, prefix=sha_prefix, group=btn_group: self._on_keep_both(
                     prefix, group
@@ -1844,14 +1933,14 @@ class DuplicateReviewDialog(QDialog):
         buttons_row = QHBoxLayout()
         cancel_btn = QPushButton('Cancel')
         cancel_btn.setObjectName('toolbarBtn')
-        copy_btn = QPushButton('Copy non-keepers to review folder')
-        copy_btn.setObjectName('accentBtn')
+        apply_btn = QPushButton('Delete unselected duplicates')
+        apply_btn.setObjectName('accentBtn')
         buttons_row.addWidget(cancel_btn)
         buttons_row.addStretch(1)
-        buttons_row.addWidget(copy_btn)
+        buttons_row.addWidget(apply_btn)
         root.addLayout(buttons_row)
 
-        copy_btn.clicked.connect(self._on_copy_clicked)
+        apply_btn.clicked.connect(self._on_apply_clicked)
         cancel_btn.clicked.connect(self.reject)
         self._apply_theme(scroll, inner)
 
@@ -1892,11 +1981,6 @@ class DuplicateReviewDialog(QDialog):
         keeper = QCheckBox('Keep this one')
         keeper.setProperty('dup_filename', filename)
         keeper.setChecked(checked)
-        keeper.toggled.connect(
-            lambda on, group=btn_group, btn=keeper, prefix=sha_prefix: self._on_keeper_toggled(
-                group, btn, on, prefix
-            )
-        )
         btn_group.addButton(keeper)
         lay.addWidget(keeper, alignment=Qt.AlignCenter)
 
@@ -1908,24 +1992,8 @@ class DuplicateReviewDialog(QDialog):
         return card
 
     def _on_keep_both(self, sha_prefix: str, btn_group: QButtonGroup) -> None:
-        self._keep_both_groups.add(sha_prefix)
         for btn in btn_group.buttons():
-            btn.blockSignals(True)
             btn.setChecked(True)
-            btn.blockSignals(False)
-
-    def _on_keeper_toggled(
-        self, btn_group: QButtonGroup, toggled_btn: QCheckBox, checked: bool, sha_prefix: str
-    ) -> None:
-        if not checked:
-            return
-        self._keep_both_groups.discard(sha_prefix)
-        for btn in btn_group.buttons():
-            if btn is toggled_btn:
-                continue
-            btn.blockSignals(True)
-            btn.setChecked(False)
-            btn.blockSignals(False)
 
     def _open_compare(self, files: list[tuple[str, Path]]) -> None:
         existing = [(name, path) for name, path in files if path.is_file()]
@@ -1943,76 +2011,109 @@ class DuplicateReviewDialog(QDialog):
         enable_styled_surface(inner)
         paint_widget_surface(inner, dark=self._dark, role='bg')
 
-    def _keeper_filename(self, btn_group: QButtonGroup, entries_sorted: list) -> str:
-        chosen_btn = next((b for b in btn_group.buttons() if b.isChecked()), None)
-        if chosen_btn is not None:
-            name = chosen_btn.property('dup_filename')
-            if name:
-                return str(name)
-            text = chosen_btn.text().strip()
-            if text:
-                return text
-        return entries_sorted[0].filename if entries_sorted else ''
+    def _selected_filenames(self, btn_group: QButtonGroup) -> list[str]:
+        names: list[str] = []
+        for b in btn_group.buttons():
+            if b.isChecked():
+                name = b.property('dup_filename')
+                if name:
+                    names.append(str(name))
+        return names
 
-    def _on_copy_clicked(self) -> None:
+    def _on_apply_clicked(self) -> None:
+        # Gather non-keepers (unticked) per group. As a safety net we never
+        # delete an entire group: if nothing is ticked, we keep everything.
+        to_delete: list[str] = []
+        skipped_all_unselected: list[str] = []
+        group_selections: dict[str, dict] = {}
+        for sha_prefix, entries_sorted, btn_group in self._group_ui:
+            keepers = set(self._selected_filenames(btn_group))
+            if not keepers:
+                skipped_all_unselected.append(sha_prefix)
+                group_selections[sha_prefix] = {
+                    'keepers': [e.filename for e in entries_sorted],
+                    'deleted': [],
+                    'note': 'nothing selected - kept all',
+                }
+                continue
+            non_keepers = [e.filename for e in entries_sorted if e.filename not in keepers]
+            group_selections[sha_prefix] = {
+                'keepers': sorted(keepers),
+                'deleted': non_keepers,
+            }
+            to_delete.extend(non_keepers)
+
+        if not to_delete:
+            QMessageBox.information(
+                self,
+                'Nothing to delete',
+                'Every duplicate is selected to keep, so there is nothing to delete.',
+            )
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            'Permanently delete duplicates?',
+            f'{len(to_delete)} unselected file(s) will be permanently deleted from '
+            f'your library:\n{self.paths.merged_dir}\n\n'
+            f'This cannot be undone. Continue?',
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        deleted = 0
+        deleted_files: list[str] = []
+        errors: list[str] = []
+        for name in to_delete:
+            src = self.paths.merged_dir / name
+            try:
+                if src.is_file():
+                    src.unlink()
+                    deleted += 1
+                    deleted_files.append(name)
+            except OSError as exc:
+                errors.append(f'{name}: {exc}')
+
         ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-        out_dir = self.paths.library_root / f'duplicates_selected_{ts}'
-        out_dir.mkdir(parents=True, exist_ok=True)
-
         selection_report = {
             'generated_at_utc': datetime.utcnow().isoformat() + 'Z',
             'account_name': self.account_name,
             'source_folder': str(self.paths.merged_dir),
-            'review_folder': str(out_dir),
-            'group_selections': {},
-            'copied_non_keeper_files': [],
+            'action': 'permanent_delete',
+            'deleted_count': deleted,
+            'group_selections': group_selections,
+            'deleted_files': deleted_files,
+            'errors': errors,
         }
+        out_json = None
+        try:
+            self.paths.reports_dir.mkdir(parents=True, exist_ok=True)
+            out_json = self.paths.reports_dir / f'duplicates_deleted_report_{ts}.json'
+            out_json.write_text(json.dumps(selection_report, indent=2), encoding='utf-8')
+        except OSError:
+            out_json = None
 
-        copied = 0
-        for sha_prefix, entries_sorted, btn_group in self._group_ui:
-            if sha_prefix in self._keep_both_groups:
-                selection_report['group_selections'][sha_prefix] = {
-                    'keeper': 'all',
-                    'non_keepers': [],
-                }
-                continue
-            keeper_name = self._keeper_filename(btn_group, entries_sorted)
-
-            non_keepers = [e for e in entries_sorted if e.filename != keeper_name]
-            selection_report['group_selections'][sha_prefix] = {
-                'keeper': keeper_name,
-                'non_keepers': [e.filename for e in non_keepers],
-            }
-
-            group_dir = out_dir / sha_prefix
-            group_dir.mkdir(parents=True, exist_ok=True)
-
-            for e in non_keepers:
-                src = self.paths.merged_dir / e.filename
-                if not src.is_file():
-                    continue
-                dest = group_dir / e.filename
-                if dest.exists():
-                    dest = group_dir / f"{src.stem}_dup{copied + 1}{src.suffix}"
-                shutil.copy2(str(src), str(dest))
-                selection_report['copied_non_keeper_files'].append(str(dest))
-                copied += 1
-
-        self.paths.reports_dir.mkdir(parents=True, exist_ok=True)
-        out_json = self.paths.reports_dir / f'duplicates_selected_report_{ts}.json'
-        out_json.write_text(json.dumps(selection_report, indent=2), encoding='utf-8')
-
-        QMessageBox.information(
-            self,
-            'Duplicates copied',
-            f'Copied {copied} non-keeper file(s) to:\n{out_dir}\n\n'
-            f'Selection report:\n{out_json}',
-        )
+        msg = f'Permanently deleted {deleted} duplicate file(s).'
+        if skipped_all_unselected:
+            msg += (
+                f'\n\n{len(skipped_all_unselected)} group(s) had nothing selected, '
+                f'so all their files were kept.'
+            )
+        if errors:
+            msg += (
+                f'\n\n{len(errors)} file(s) could not be deleted:\n'
+                + '\n'.join(errors[:8])
+            )
+        if out_json is not None:
+            msg += f'\n\nReport:\n{out_json}'
+        QMessageBox.information(self, 'Duplicates deleted', msg)
         self.accept()
 
 
 class LocalExportWorker(QThread):
-    """Process bundled Snapchat exports (media inside ZIP, no CDN links)."""
+    """Process bundled Snapchat exports (media inside ZIP, fully offline)."""
     finished = pyqtSignal(int)
     output = pyqtSignal(str)
     progress = pyqtSignal(int, int)
@@ -2025,7 +2126,7 @@ class LocalExportWorker(QThread):
         merge_overlays=True,
         keep_raw=True,
         repair_videos=True,
-        performance_mode="maximum",
+        performance_mode="balanced",
         zip_paths=None,
         paths=None,
     ):
@@ -2273,6 +2374,7 @@ class DownloaderGUI(QMainWindow):
         self.media_viewer = None  # Will be initialized in init_ui
         self.fullscreen_popup = FullScreenMediaPopup(self)  # Overlay media viewer
         self.dark_mode_enabled = True  # resolved theme is dark
+        self._map_html_temp_files: list[Path] = []
         self.init_ui()
         self.processing_shield = ProcessingShieldOverlay(self, on_cancel=self.cancel_download)
         self.stdout_redirector = StreamRedirector(self.append_debug_message)
@@ -2287,9 +2389,9 @@ class DownloaderGUI(QMainWindow):
                     800,
                     lambda: QMessageBox.warning(
                         self,
-                        'Update required',
+                        'Incomplete build',
                         'This copy of SMD cannot process bundled ZIP exports.\n\n'
-                        'Please install the latest version of Snapchat Memories Downloader.',
+                        'Reinstall from the official release package.',
                     ),
                 )
         
@@ -2365,17 +2467,23 @@ class DownloaderGUI(QMainWindow):
             self._apply_status(self.status_label, 'Video tools missing - reinstall SMD from the official installer.', "err")
 
     def closeEvent(self, event):
-        """Clean up temporary files when app closes."""
-        try:
-            # Delete temp map files
-            temp_files = ['temp_default_map.html', 'temp_gps_map.html']
-            for filename in temp_files:
-                temp_path = Path(filename)
+        """Clean up temporary map HTML files when the app closes."""
+        self._cleanup_map_html_temps()
+        event.accept()
+
+    def _track_map_html_temp(self, path: str | Path) -> None:
+        temp_path = Path(path)
+        if temp_path not in self._map_html_temp_files:
+            self._map_html_temp_files.append(temp_path)
+
+    def _cleanup_map_html_temps(self) -> None:
+        for temp_path in self._map_html_temp_files:
+            try:
                 if temp_path.exists():
                     temp_path.unlink()
-        except Exception:
-            pass
-        event.accept()
+            except OSError:
+                pass
+        self._map_html_temp_files.clear()
 
     def apply_window_icon(self):
         """Set the window icon from icon.ico or icon.png if present."""
@@ -2609,13 +2717,24 @@ class DownloaderGUI(QMainWindow):
         header_layout.addWidget(self.header_logo)
 
         title_col = QVBoxLayout()
-        title_col.setSpacing(0)
+        title_col.setSpacing(2)
         header = QLabel('Snapchat Memories Downloader')
         header.setProperty('class', 'pageTitle')
+        subtitle_row = QHBoxLayout()
+        subtitle_row.setSpacing(8)
         subtitle = QLabel(f'Version {__version__}')
         subtitle.setProperty('class', 'caption')
+        offline_badge = QLabel('Works fully offline')
+        offline_badge.setObjectName('offlineBadge')
+        offline_badge.setToolTip(
+            'Memory processing runs on your PC with no uploads. '
+            'The optional GPS map may load map tiles when you open File Checker.'
+        )
+        subtitle_row.addWidget(subtitle)
+        subtitle_row.addWidget(offline_badge)
+        subtitle_row.addStretch(1)
         title_col.addWidget(header)
-        title_col.addWidget(subtitle)
+        title_col.addLayout(subtitle_row)
         header_layout.addLayout(title_col)
         header_layout.addStretch()
 
@@ -2839,8 +2958,8 @@ class DownloaderGUI(QMainWindow):
         self.review_duplicates_btn = QPushButton('Review duplicates')
         self.review_duplicates_btn.setObjectName('toolbarBtn')
         self.review_duplicates_btn.setToolTip(
-            'Scan merged/ for byte-identical duplicates, let you pick one keeper per group, '
-            'then copy the non-keepers to a review folder (merged/ is not modified).'
+            'Scan merged/ for byte-identical duplicates, tick the copies to keep per group, '
+            'then permanently delete the ones you did not keep.'
         )
         self.review_duplicates_btn.clicked.connect(self.review_duplicates)
 
@@ -2857,6 +2976,7 @@ class DownloaderGUI(QMainWindow):
         after_lay.addLayout(after_grid)
 
         self._setup_section = setup_box
+        self._perf_section = perf_box
         self._run_section = run_box
         self._after_section = after_box
         self._process_controls_grid_host = QWidget()
@@ -2910,6 +3030,9 @@ class DownloaderGUI(QMainWindow):
         self._run_log_buffer: list[str] = []
         self._last_estimate_label: str | None = None
         controls_layout.addWidget(progress_box)
+        # Absorb leftover vertical space so the last section (Progress) keeps its
+        # natural height instead of stretching tall when the dashboard is hidden.
+        controls_layout.addStretch(1)
 
         self.download_running = False
         download_tab_layout.addWidget(self._form_tab(process_panel))
@@ -3078,18 +3201,28 @@ class DownloaderGUI(QMainWindow):
         # File Checker workflow state
         self.full_analysis_mode = False
         
-        # Performance mode: 'balanced', 'maximum', 'conservative'
-        self.performance_mode = 'maximum'
+        # Performance mode: 'balanced' (default), 'maximum', 'conservative'.
+        # Restore the user's last choice; fall back to the friendly default.
+        from smd.system_profile import PERF_MODES, mode_to_combo_index
+
+        self._perf_settings = QSettings("SMD", "SnapchatMemoriesDownloader")
+        saved_mode = self._perf_settings.value("performance_mode_v1", None, type=str)
+        self.performance_mode = saved_mode if saved_mode in PERF_MODES else 'balanced'
+        self.perf_mode_combo.blockSignals(True)
+        self.perf_mode_combo.setCurrentIndex(mode_to_combo_index(self.performance_mode))
+        self.perf_mode_combo.blockSignals(False)
+
         self._last_power_on_battery: bool | None = None
         self.power_watch_timer = QTimer()
         self.power_watch_timer.timeout.connect(self.refresh_system_profile)
         self.power_watch_timer.start(30_000)
 
         self.refresh_system_profile()
-        settings = QSettings("SMD", "SnapchatMemoriesDownloader")
-        if not settings.value("auto_perf_applied_v1", False, type=bool):
+        # First launch only: seed the mode from a hardware-based recommendation.
+        # After that we honour whatever the user last selected.
+        if not self._perf_settings.value("auto_perf_applied_v1", False, type=bool):
             self.apply_recommended_settings(silent=True)
-            settings.setValue("auto_perf_applied_v1", True)
+            self._perf_settings.setValue("auto_perf_applied_v1", True)
 
         self.update_export_ui_mode()
 
@@ -3128,6 +3261,7 @@ class DownloaderGUI(QMainWindow):
         temp_path = temp_file.name
         temp_file.close()
         m.save(temp_path)
+        self._track_map_html_temp(temp_path)
 
         map_url = QUrl.fromLocalFile(str(Path(temp_path).absolute()))
         if WEB_ENGINE_AVAILABLE and hasattr(self.map_view, 'setUrl'):
@@ -3202,6 +3336,7 @@ class DownloaderGUI(QMainWindow):
 
         rec = recommend_settings()
         self.performance_mode = rec.performance_mode
+        self._persist_perf_mode()
         self.perf_mode_combo.blockSignals(True)
         self.perf_mode_combo.setCurrentIndex(mode_to_combo_index(rec.performance_mode))
         self.perf_mode_combo.blockSignals(False)
@@ -3216,9 +3351,17 @@ class DownloaderGUI(QMainWindow):
     def on_perf_mode_changed(self, index):
         """Handle performance mode change"""
         mode_map = {0: 'maximum', 1: 'balanced', 2: 'conservative'}
-        self.performance_mode = mode_map.get(index, 'maximum')
+        self.performance_mode = mode_map.get(index, 'balanced')
+        self._persist_perf_mode()
         self.refresh_system_profile()
         self.update_export_ui_mode()
+
+    def _persist_perf_mode(self) -> None:
+        """Remember the selected performance mode across launches."""
+        try:
+            self._perf_settings.setValue("performance_mode_v1", self.performance_mode)
+        except Exception:
+            pass
     
     def _account_name(self) -> str:
         return self.account_input.text().strip()
@@ -4104,67 +4247,7 @@ class DownloaderGUI(QMainWindow):
     
     def generate_thumbnail_base64(self, media_path, max_size=150):
         """Generate a base64 encoded thumbnail for map preview (photo or video)."""
-        path = Path(media_path)
-        try:
-            if path.suffix.lower() in ('.mp4', '.mov', '.m4v', '.mkv', '.avi'):
-                return self._video_frame_thumbnail_b64(path, max_size)
-            img = Image.open(path)
-            if img.mode in ('RGBA', 'LA', 'P'):
-                background = Image.new('RGB', img.size, (255, 255, 255))
-                if img.mode == 'P':
-                    img = img.convert('RGBA')
-                if img.mode in ('RGBA', 'LA'):
-                    background.paste(img, mask=img.split()[-1])
-                    img = background
-            img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-            import io
-            buffer = io.BytesIO()
-            img.save(buffer, format='JPEG', quality=90)
-            img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-            return f"data:image/jpeg;base64,{img_base64}"
-        except Exception:
-            return None
-
-    def _video_frame_thumbnail_b64(self, video_path: Path, max_size: int = 150):
-        """Extract one frame with ffmpeg for map popup."""
-        from smd.ffmpeg_bundle import resolve_ffmpeg
-        ffmpeg = resolve_ffmpeg()
-        if not ffmpeg:
-            return None
-        tmp = Path(tempfile.gettempdir()) / f"smd_thumb_{video_path.stem[:20]}.jpg"
-        try:
-            startupinfo = None
-            creationflags = 0
-            if sys.platform.startswith('win'):
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                creationflags = subprocess.CREATE_NO_WINDOW
-            subprocess.run(
-                [
-                    ffmpeg, '-nostdin', '-y', '-ss', '0.5', '-i', str(video_path),
-                    '-vframes', '1', '-q:v', '2', str(tmp),
-                ],
-                capture_output=True,
-                timeout=15,
-                startupinfo=startupinfo,
-                creationflags=creationflags,
-                check=False,
-            )
-            if not tmp.is_file() or tmp.stat().st_size < 100:
-                return None
-            img = Image.open(tmp)
-            img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-            import io
-            buffer = io.BytesIO()
-            img.convert('RGB').save(buffer, format='JPEG', quality=90)
-            return f"data:image/jpeg;base64,{base64.b64encode(buffer.getvalue()).decode('utf-8')}"
-        except Exception:
-            return None
-        finally:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
+        return generate_thumbnail_base64(media_path, max_size)
 
     def on_map_error(self, error_msg):
         """Handle map scanning errors"""
@@ -4202,7 +4285,10 @@ class DownloaderGUI(QMainWindow):
             self._last_map_locations = locations
 
             self._stop_worker('map_render_worker')
-            self.map_render_worker = MapRenderWorker(locations, self)
+            self.map_render_worker = MapRenderWorker(
+                locations,
+                dark_mode=bool(getattr(self, 'dark_mode_enabled', False)),
+            )
             self.map_render_worker.progress.connect(self.on_map_render_progress)
             self.map_render_worker.finished.connect(self.on_map_render_finished)
             self.map_render_worker.error.connect(self.on_map_render_error)
@@ -4303,6 +4389,7 @@ class DownloaderGUI(QMainWindow):
         print("DEBUG: on_map_render_finished called")
         try:
             print(f"DEBUG: Map file path: {html_file_path}")
+            self._track_map_html_temp(html_file_path)
             self.stop_status_animation()
             self.unified_progress.setValue(100)
             
@@ -4596,7 +4683,10 @@ class DownloaderGUI(QMainWindow):
             self.start_status_animation('Rendering map with markers...')
             self._last_map_locations = gps_data
             self._stop_worker('map_render_worker')
-            self.map_render_worker = MapRenderWorker(gps_data, self)
+            self.map_render_worker = MapRenderWorker(
+                gps_data,
+                dark_mode=bool(getattr(self, 'dark_mode_enabled', False)),
+            )
             self.map_render_worker.progress.connect(self.on_map_render_progress)
             self.map_render_worker.finished.connect(self.on_map_render_finished)
             self.map_render_worker.error.connect(self.on_map_render_error)
@@ -4809,52 +4899,11 @@ class DownloaderGUI(QMainWindow):
                 status=msg,
                 status_kind="ok",
             )
-            play_happy_tone()
-            account_name = self._account_name()
-            paths = self._account_paths(account_name)
-            report = None
-            keep_raw = self.save_raw_chk.isChecked()
             try:
-                stats = getattr(getattr(self, 'local_export_worker', None), 'run_stats', None)
-                from smd.account_layout import format_bytes
-                from smd.session_report import build_session_report, save_session_report
-                from smd.staging_check import check_staging_readiness, delete_staging_folder
-
-                readiness = check_staging_readiness(
-                    paths.account_dir, layout=paths, require_raw=keep_raw
-                )
-                staging_deleted = False
-                staging_freed = ""
-                if readiness.safe_to_delete:
-                    ok, _msg = delete_staging_folder(
-                        paths.account_dir, report=readiness, layout=paths
-                    )
-                    if ok:
-                        staging_deleted = True
-                        staging_freed = format_bytes(readiness.staging_bytes)
-
-                report = build_session_report(
-                    paths.account_dir,
-                    stats=stats,
-                    success=True,
-                    require_raw=keep_raw,
-                    staging_deleted=staging_deleted,
-                    staging_freed=staging_freed,
-                    layout=paths,
-                )
-                save_session_report(paths, report)
-                dlg = SessionSummaryDialog(report, paths.library_root, paths.reports_dir, self)
-                dlg.exec_()
-                if hasattr(self, 'processing_shield'):
-                    self.processing_shield.hide()
-                QTimer.singleShot(
-                    0,
-                    lambda an=account_name, p=paths, r=report: self._after_processing_summary(an, p, r),
-                )
-            except Exception as exc:
-                print(f"Session summary error: {exc}")
-                if hasattr(self, 'processing_shield'):
-                    self.processing_shield.hide()
+                play_happy_tone()
+            except Exception:
+                pass
+            self._show_completion_summary()
         else:
             if hasattr(self, 'processing_shield'):
                 self.processing_shield.hide()
@@ -5019,7 +5068,10 @@ class DownloaderGUI(QMainWindow):
             if worker is not None and worker.isRunning():
                 return
             self._stop_worker('map_render_worker')
-            self.map_render_worker = MapRenderWorker(locations, self)
+            self.map_render_worker = MapRenderWorker(
+                locations,
+                dark_mode=bool(getattr(self, 'dark_mode_enabled', False)),
+            )
             self.map_render_worker.finished.connect(self.on_map_render_finished)
             self.map_render_worker.error.connect(self.on_map_render_error)
             self.map_render_worker.start()
@@ -5038,6 +5090,99 @@ class DownloaderGUI(QMainWindow):
         )
         self._apply_current_theme()
         self._refresh_map_for_theme()
+
+    def _show_completion_summary(self) -> None:
+        """Build and show the post-run summary. Always gives feedback and always
+        hides the processing shield, even if any single step fails."""
+        account_name = self._account_name()
+        report = None
+        paths = None
+        try:
+            paths = self._account_paths(account_name)
+            keep_raw = self.save_raw_chk.isChecked()
+            stats = getattr(getattr(self, 'local_export_worker', None), 'run_stats', None)
+
+            from smd.account_layout import format_bytes
+            from smd.session_report import build_session_report, save_session_report
+            from smd.staging_check import check_staging_readiness, delete_staging_folder
+
+            readiness = check_staging_readiness(
+                paths.account_dir, layout=paths, require_raw=keep_raw
+            )
+            staging_deleted = False
+            staging_freed = ""
+            if readiness.safe_to_delete:
+                ok, _msg = delete_staging_folder(
+                    paths.account_dir, report=readiness, layout=paths
+                )
+                if ok:
+                    staging_deleted = True
+                    staging_freed = format_bytes(readiness.staging_bytes)
+
+            report = build_session_report(
+                paths.account_dir,
+                stats=stats,
+                success=True,
+                require_raw=keep_raw,
+                staging_deleted=staging_deleted,
+                staging_freed=staging_freed,
+                layout=paths,
+            )
+            save_session_report(paths, report)
+        except Exception as exc:
+            self._log_completion_error("build session summary", exc, paths)
+            report = None
+
+        if hasattr(self, 'processing_shield'):
+            self.processing_shield.hide()
+
+        try:
+            if report is not None:
+                dlg = SessionSummaryDialog(report, paths.library_root, paths.reports_dir, self)
+                dlg.exec_()
+            else:
+                self._show_minimal_completion_message(account_name, paths)
+        except Exception as exc:
+            self._log_completion_error("show session summary", exc, paths)
+            self._show_minimal_completion_message(account_name, paths)
+
+        QTimer.singleShot(
+            0,
+            lambda an=account_name, p=paths, r=report: self._after_processing_summary(an, p, r),
+        )
+
+    def _show_minimal_completion_message(self, account_name: str, paths) -> None:
+        """Fallback when the rich summary dialog cannot be built."""
+        where = ''
+        try:
+            if paths is not None:
+                where = f'\n\nYour memories are saved in:\n{paths.library_root}'
+        except Exception:
+            pass
+        try:
+            QMessageBox.information(
+                self,
+                'Processing complete',
+                'Your Snapchat memories were processed successfully.' + where +
+                '\n\nUse "Open finished folder" to view them, or "Review duplicates" '
+                'to check for repeated files.',
+            )
+        except Exception:
+            pass
+
+    def _log_completion_error(self, stage: str, exc: Exception, paths) -> None:
+        """Record a completion-stage error to disk and the run log."""
+        import traceback
+        tb = traceback.format_exc()
+        print(f"Completion error ({stage}): {exc}\n{tb}")
+        try:
+            if paths is not None:
+                paths.logs_dir.mkdir(parents=True, exist_ok=True)
+                (paths.logs_dir / 'summary_error.log').write_text(
+                    f"Stage: {stage}\n{tb}\n", encoding='utf-8'
+                )
+        except Exception:
+            pass
 
     def _after_processing_summary(self, account_name: str, paths, report) -> None:
         """Refresh the main window after the session summary dialog closes."""

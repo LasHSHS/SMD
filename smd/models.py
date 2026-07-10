@@ -2,11 +2,8 @@ from datetime import datetime, timezone
 import re
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator
-import pytz
-from timezonefinder import TimezoneFinder
 
-# Initialize TimezoneFinder once globally
-_timezone_finder = TimezoneFinder()
+from smd.timeutil import to_local_datetime
 
 class Memory(BaseModel):
     model_config = {"populate_by_name": True}
@@ -44,21 +41,8 @@ class Memory(BaseModel):
 
     @property
     def filename(self) -> str:
-        # Convert UTC to local timezone based on GPS location
-        local_dt = self.date
-        if self.latitude is not None and self.longitude is not None:
-            try:
-                # Get timezone from GPS coordinates (using global instance)
-                tz_name = _timezone_finder.timezone_at(lat=self.latitude, lng=self.longitude)
-                if tz_name:
-                    tz = pytz.timezone(tz_name)
-                    local_dt = self.date.astimezone(tz)
-            except Exception:
-                # Fallback to system timezone if GPS lookup fails
-                local_dt = self.date.astimezone()
-        else:
-            # No GPS - use system timezone
-            local_dt = self.date.astimezone()
+        """Local-time output name; must stay in sync with EXIF timestamps."""
+        local_dt = to_local_datetime(self.date, self.latitude, self.longitude)
         return local_dt.strftime("%Y-%m-%d_%H-%M-%S")
 
 

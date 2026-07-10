@@ -3,9 +3,9 @@
 
 [Setup]
 AppName=Snapchat Memories Downloader
-AppVersion=2.1
-AppPublisher=Snapchat Memories Team
-AppPublisherURL=https://github.com
+AppVersion=1.0.0
+AppPublisher=Las HS
+AppPublisherURL=https://github.com/LasHSHS
 DefaultDirName={autopf}\Snapchat Memories Downloader
 DefaultGroupName=Snapchat Memories Downloader
 OutputDir=installer_output

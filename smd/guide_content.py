@@ -26,7 +26,7 @@ body {{ margin: 0; line-height: 1.55; }}
 .guide-intro {{ margin: 0 0 28px; line-height: 1.65; font-size: 16px; }}
 .guide-img-wrap {{ text-align: center; margin: 20px 0 8px; }}
 .guide-img {{
-    width: {GUIDE_IMAGE_WIDTH}px; max-width: 100%; height: auto;
+    max-width: 100%; height: auto;
     border: 1px solid #555; border-radius: 12px;
 }}
 .guide-missing {{
@@ -44,6 +44,25 @@ def guide_assets_dir() -> Path:
         if candidate.is_dir():
             return candidate
     return root / 'assets' / 'guide'
+
+
+def _scaled_image_size(path: Path, target_width: int) -> tuple[int, int]:
+    """Width/height (px) for an image scaled to target_width, preserving aspect.
+
+    Qt's rich-text layout reserves an image's *native* height even when CSS
+    scales its width, which leaves large vertical gaps. Emitting explicit
+    width+height attributes makes the layout reserve the correct scaled height.
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(path) as img:
+            w, h = img.size
+        if w > 0:
+            return target_width, max(1, round(target_width * h / w))
+    except Exception:
+        pass
+    return target_width, target_width
 
 
 def _guide_steps(save_tab_name: str) -> list[dict]:
@@ -135,9 +154,11 @@ def build_guide_html(save_tab_name: str) -> str:
             path = guide_dir / f'{image}.png'
             if path.is_file():
                 alt = html.escape(step.get('alt', ''))
+                w, h = _scaled_image_size(path, GUIDE_IMAGE_WIDTH)
                 parts.append(
                     f'<div class="guide-img-wrap">'
-                    f'<img class="guide-img" src="{image}.png" alt="{alt}" />'
+                    f'<img class="guide-img" src="{image}.png" alt="{alt}" '
+                    f'width="{w}" height="{h}" />'
                     f'</div>'
                 )
             else:

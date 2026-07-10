@@ -85,7 +85,7 @@ def gather_about_facts(*, web_engine_available: bool) -> dict[str, Any]:
         "frozen": frozen,
         "package_mode": "Portable Windows build" if frozen else "Source / development run",
         "package_blurb": (
-            "Self-contained — no Python or ffmpeg install required."
+            "Self-contained - no Python or ffmpeg install required."
             if frozen
             else "Running from project source; bundled tools under tools/ffmpeg when present."
         ),
@@ -124,9 +124,9 @@ def _component_cell(ok: bool, path: str, version: str, ok_hint: str, fail_hint: 
 def build_about_html(*, web_engine_available: bool) -> str:
     facts = gather_about_facts(web_engine_available=web_engine_available)
     map_status = (
-        "Available — interactive map in File Checker."
+        "Available - interactive map in File Checker."
         if facts["web_engine_ok"]
-        else "Not in this build — GPS scan and file analysis still work."
+        else "Not in this build - GPS scan and file analysis still work."
     )
 
     parts = [
@@ -134,11 +134,11 @@ def build_about_html(*, web_engine_available: bool) -> str:
         # --- Header ---
         f"<section style='{_SECTION}'>",
         f"<h2 style='{_H2}'>Snapchat Memories Downloader (SMD)</h2>",
-        f"<p>Version <b>{html.escape(facts['version'])}</b> — turns your Snapchat Memories export "
+        f"<p>Version <b>{html.escape(facts['version'])}</b> - turns your Snapchat Memories export "
         "into a normal photo and video library on your PC, with capture dates, GPS, and filters "
         "preserved where Snapchat included them.</p>",
         f"<p>Created by <a href='{AUTHOR_URL}'><b>Las HS</b></a>. "
-        f"Source and updates on <a href='{AUTHOR_URL}'>GitHub</a>. "
+        f"Source and releases on <a href='{AUTHOR_URL}'>GitHub</a>. "
         "<b>Not affiliated with Snap Inc.</b></p>",
         f"<p style='{_MUTED}'>For step-by-step instructions and troubleshooting, see the "
         "<b>Guide</b> and <b>Help</b> tabs.</p>",
@@ -150,10 +150,10 @@ def build_about_html(*, web_engine_available: bool) -> str:
             "ok",
             "Your data stays on your machine",
             "<ul style='margin:0 0 0 18px;padding:0;'>"
-            "<li><b>No telemetry</b> — SMD does not phone home or collect usage analytics</li>"
-            "<li><b>Local processing</b> — export ZIPs and output media never leave your PC</li>"
-            "<li><b>Limited network</b> — internet is only used for CDN download exports "
-            "(older export style) or map tiles in File Checker</li>"
+            "<li><b>No telemetry</b> - SMD does not phone home or collect usage analytics</li>"
+            "<li><b>Local processing</b> - export ZIPs and output media never leave your PC</li>"
+            "<li><b>Offline by default</b> - memory processing needs no internet; "
+            "the optional GPS map may load map tiles when you open File Checker</li>"
             "</ul>",
         ),
         "<p>SMD only opens files and folders you choose. It does not access your Snapchat account "
@@ -182,7 +182,7 @@ def build_about_html(*, web_engine_available: bool) -> str:
                         facts["ffmpeg_path"],
                         facts["ffmpeg_version"],
                         "Video overlays and metadata tagging.",
-                        "Missing — reinstall SMD or add tools under "
+                        "Missing - reinstall SMD or add tools under "
                         "<code>{install}\\tools\\ffmpeg\\</code>.",
                     ),
                 ),
@@ -193,7 +193,7 @@ def build_about_html(*, web_engine_available: bool) -> str:
                         facts["ffprobe_path"],
                         facts["ffprobe_version"],
                         "Reads video streams and embedded GPS.",
-                        "Missing — video processing needs both ffmpeg and ffprobe.",
+                        "Missing - video processing needs both ffmpeg and ffprobe.",
                     ),
                 ),
                 (
@@ -215,13 +215,13 @@ def build_about_html(*, web_engine_available: bool) -> str:
         f"<section style='{_SECTION}'>",
         f"<h3 style='{_H3}'>Support the project</h3>",
         support_options_html(),
-        f"<p>Source code, issues, and updates: <a href='{AUTHOR_URL}'>GitHub — LasHSHS</a></p>",
+        f"<p>Source code, issues, and releases: <a href='{AUTHOR_URL}'>GitHub - LasHSHS</a></p>",
         "</section>",
         # --- Technical details ---
         f"<section style='{_SECTION} border-bottom:none;'>",
         f"<h3 style='{_H3}'>Technical details</h3>",
-        f"<p style='{_MUTED}'>For bug reports. Paths use placeholders — "
-        "<code>{install}</code> is this app's folder — so nothing personal is exposed.</p>",
+        f"<p style='{_MUTED}'>For bug reports. Paths use placeholders - "
+        "<code>{install}</code> is this app's folder - so nothing personal is exposed.</p>",
     ]
 
     tech_rows: list[tuple[str, str]] = [

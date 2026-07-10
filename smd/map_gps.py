@@ -12,17 +12,19 @@ _DATE_STEM_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})")
 def build_json_coord_lookup(memories: list[Memory]) -> dict[str, tuple[float, float]]:
     """Index JSON memories by every filename stem we might see on disk."""
     lookup: dict[str, tuple[float, float]] = {}
+    local_keys: dict[str, tuple[float, float]] = {}
     for memory in memories:
         if memory.latitude is None or memory.longitude is None:
             continue
         coords = (float(memory.latitude), float(memory.longitude))
-        keys = {
-            memory.filename,
-            memory.date.strftime("%Y-%m-%d_%H-%M-%S"),
-        }
-        for key in keys:
-            if key:
-                lookup[key] = coords
+        # UTC-formatted stems cover legacy files named before timezone handling.
+        utc_key = memory.date.strftime("%Y-%m-%d_%H-%M-%S")
+        if utc_key:
+            lookup[utc_key] = coords
+        if memory.filename:
+            local_keys[memory.filename] = coords
+    # Local-time names are the current naming scheme - they win on collisions.
+    lookup.update(local_keys)
     return lookup
 
 

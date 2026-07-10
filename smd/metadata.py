@@ -5,7 +5,7 @@ import json
 import shutil
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import pytz
 from timezonefinder import TimezoneFinder
 import exif
@@ -15,25 +15,13 @@ from mutagen.mp4 import MP4
 from PIL import Image
 from PIL.ExifTags import TAGS, GPSTAGS
 
-# Initialize global timezone finder
-_timezone_finder = TimezoneFinder()
-
 _FFPROBE_AVAILABLE = ffprobe_available()
 
 def get_local_datetime(memory: Memory) -> datetime:
     """Convert memory date to local time based on GPS or system timezone."""
-    local_dt = memory.date
-    if memory.latitude is not None and memory.longitude is not None:
-        try:
-            tz_name = _timezone_finder.timezone_at(lat=memory.latitude, lng=memory.longitude)
-            if tz_name:
-                tz = pytz.timezone(tz_name)
-                local_dt = memory.date.astimezone(tz)
-        except Exception:
-            local_dt = memory.date.astimezone()
-    else:
-        local_dt = memory.date.astimezone()
-    return local_dt
+    from smd.timeutil import to_local_datetime
+
+    return to_local_datetime(memory.date, memory.latitude, memory.longitude)
 
 def add_exif_data_img(image_path: Path, memory: Memory):
     """Embed EXIF data into JPEG images using python-exif, with Pillow fallback."""
@@ -87,29 +75,90 @@ def add_exif_data_img(image_path: Path, memory: Memory):
         except OSError:
             pass
 
-def add_mp4_metadata(video_path: Path, memory: Memory):
-    """Embed creation date and ISO6709 location into MP4 using Mutagen."""
+def _gps_iso6709(memory: Memory) -> str | None:
+    """ISO 6709 coordinate string for QuickTime location tags, or None."""
+    if memory.latitude is None or memory.longitude is None:
+        return None
+    lat, lon = memory.latitude, memory.longitude
+    lat_p = "+" if lat >= 0 else "-"
+    lon_p = "+" if lon >= 0 else "-"
+    # 6 decimal places keeps GPS precision to ~0.1 m (4 was ~11 m).
+    return f"{lat_p}{abs(lat):.6f}{lon_p}{abs(lon):.6f}/"
+
+
+def _set_video_container_date(file_path: Path, memory: Memory) -> bool:
+    """Set the MP4/MOV container ``creation_time`` (and location) via a fast
+    ffmpeg ``-c copy`` remux.
+
+    Many tools (Windows Explorer "Media created", Google Photos, players) read
+    the container ``creation_time`` in the ``mvhd``/``udta`` box rather than the
+    iTunes-style ``\xa9day`` atom that mutagen writes. Snapchat leaves its own
+    original timestamp there, so without this the capture date is invisible to
+    those tools. QuickTime stores this in UTC; viewers convert to local time,
+    which matches our local-time filename.
+    """
+    from smd.ffmpeg_bundle import resolve_ffmpeg
+    from smd.fsutil import tmp_sibling
+    from smd.procutil import subprocess_flags
+
+    ffmpeg = resolve_ffmpeg()
+    if not ffmpeg:
+        return False
+
+    utc_dt = memory.date.astimezone(timezone.utc)
+    creation = utc_dt.strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    startupinfo, creationflags = subprocess_flags()
+    tmp = tmp_sibling(file_path)
+
+    cmd = [
+        ffmpeg, "-nostdin", "-y",
+        "-i", str(file_path),
+        "-map", "0", "-c", "copy", "-map_metadata", "0",
+        "-metadata", f"creation_time={creation}",
+    ]
+    gps_iso = _gps_iso6709(memory)
+    if gps_iso:
+        cmd += [
+            "-metadata", f"location={gps_iso}",
+            "-metadata", f"location-eng={gps_iso}",
+        ]
+    cmd.append(str(tmp))
+
     try:
-        mp4 = MP4(str(video_path))
-        local_dt = get_local_datetime(memory)
-        date_iso = local_dt.strftime("%Y-%m-%dT%H:%M:%S%z")
-        
-        # Standard QuickTime tags
-        mp4['\xa9day'] = [date_iso]
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+            timeout=180,
+        )
+        if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+            os.replace(tmp, file_path)
+            return True
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    if tmp.exists():
         try:
-            mp4['\xa9nam'] = [memory.filename]
-        except Exception:
+            tmp.unlink()
+        except OSError:
             pass
-            
-        # Location logic is handled in apply_video_metadata for consistency
-        mp4.save()
+    return False
+
+
+def apply_video_metadata(file_path: Path, memory: Memory):
+    """Apply MP4/MOV metadata: always write capture date; GPS when available.
+
+    Sets both the container ``creation_time`` (recognized by Explorer, Photos,
+    players) and the iTunes-style ``\xa9day``/``\xa9xyz`` atoms (used by SMD's
+    own GPS map and Apple software).
+    """
+    # Container-level date/location first (ffmpeg remux), so the mutagen atoms
+    # added below survive on the final file.
+    try:
+        _set_video_container_date(file_path, memory)
     except Exception:
         pass
 
-# embed_gps_fallback_exiftool removed (Deprecated)
-
-def apply_video_metadata(file_path: Path, memory: Memory):
-    """Apply MP4/MOV metadata: always write capture date; GPS when available."""
     try:
         video = MP4(str(file_path))
         date_iso = get_local_datetime(memory).strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -120,12 +169,8 @@ def apply_video_metadata(file_path: Path, memory: Memory):
         except Exception:
             pass
 
-        if memory.latitude is not None and memory.longitude is not None:
-            lat = memory.latitude
-            lon = memory.longitude
-            lat_p = "+" if lat >= 0 else "-"
-            lon_p = "+" if lon >= 0 else "-"
-            gps_iso = f"{lat_p}{abs(lat):.4f}{lon_p}{abs(lon):.4f}/"
+        gps_iso = _gps_iso6709(memory)
+        if gps_iso:
             video["\xa9xyz"] = [gps_iso]
 
         video.save()
@@ -273,62 +318,6 @@ def extract_gps_image(image_path: Path) -> tuple[float, float] | None:
             return coords
     return None
 
-def _parse_coordinate(value):
-    """Parse a single coordinate value with optional direction (N/S/E/W)."""
-    try:
-        s = str(value).strip()
-        # Extract direction if present
-        direction = None
-        for d in ['N', 'S', 'E', 'W']:
-            if d in s.upper():
-                direction = d
-                s = s.upper().replace(d, '').strip()
-                break
-        
-        # Try to extract numeric value
-        # Handle formats: "55.6761", "55 deg 40' 34.0\""
-        s = s.replace('deg', ' ').replace("'", ' ').replace('"', ' ').replace('°', ' ')
-        
-        # Try simple decimal first
-        parts = s.split()
-        if len(parts) == 1:
-            coord = float(parts[0])
-        elif len(parts) >= 2:
-            # DMS format: degrees minutes seconds
-            d = float(parts[0])
-            m = float(parts[1]) if len(parts) > 1 else 0
-            sec = float(parts[2]) if len(parts) > 2 else 0
-            coord = d + m/60.0 + sec/3600.0
-        else:
-            return None
-        
-        # Apply direction
-        if direction in ['S', 'W']:
-            coord = -coord
-        
-        return coord
-    except (ValueError, IndexError):
-        pass
-    return None
-
-def _parse_gps_position(value):
-    """Parse GPSPosition string like '55.6761 N, 12.5683 E' or '55.6761, 12.5683'"""
-    try:
-        s = str(value).strip()
-        # Remove degree symbols and clean up
-        s = s.replace('°', ' ').replace("'", ' ').replace('"', ' ')
-        
-        # Pattern: "lat [N/S], lon [E/W]"
-        parts = [p.strip() for p in s.split(',')]
-        if len(parts) == 2:
-            lat = _parse_coordinate(parts[0])
-            lon = _parse_coordinate(parts[1])
-            if lat is not None and lon is not None:
-                return (lat, lon)
-    except Exception:
-        pass
-    return None
-
 def _parse_iso6709(value):
     """Parse ISO6709 or simple lat/lon strings found in video tags."""
     try:
@@ -358,12 +347,9 @@ def _extract_gps_ffprobe(video_path: Path):
         str(video_path)
     ]
 
-    startupinfo = None
-    creationflags = 0
-    if sys.platform.startswith('win'):
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        creationflags = subprocess.CREATE_NO_WINDOW
+    from smd.procutil import subprocess_flags
+
+    startupinfo, creationflags = subprocess_flags()
 
     try:
         result = subprocess.run(

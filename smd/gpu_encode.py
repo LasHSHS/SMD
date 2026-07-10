@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from smd.ffmpeg_bundle import resolve_ffmpeg
+from smd.procutil import subprocess_flags as _subprocess_flags
 
 
 @dataclass(frozen=True)
@@ -16,16 +17,6 @@ class VideoEncodeProfile:
     id: str
     label: str
     args: tuple[str, ...]
-
-
-def _subprocess_flags():
-    startupinfo = None
-    creationflags = 0
-    if sys.platform.startswith("win"):
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        creationflags = subprocess.CREATE_NO_WINDOW
-    return startupinfo, creationflags
 
 
 @lru_cache(maxsize=4)

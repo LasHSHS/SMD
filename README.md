@@ -1,25 +1,26 @@
 # Snapchat Memories Downloader (SMD)
 
-Download Snapchat Memories exports, fix file extensions, and preserve capture metadata (time + GPS where available).
+Process Snapchat Memories exports locally on your PC: extract bundled media, merge overlays, embed capture metadata (time + GPS where available), and browse results on a map.
 
 ## What This App Does
 
 - Imports Snapchat export ZIP files and reads `memories_history.json`
-- Downloads media with retry logic and duplicate-safe filenames
+- Processes **bundled exports** (media files inside the ZIP) fully offline
 - Detects real file type from content (not only extension)
-- Handles package ZIP media and extracts main media when possible
+- Merges Snapchat overlay filters into photos and videos when present
 - Embeds metadata for supported formats:
   - Images: EXIF date + GPS (`.jpg`, `.jpeg`)
   - Video: QuickTime/MP4 tags (`.mp4`, `.mov`)
-- Quarantines suspicious tiny files (likely broken/empty response files)
-- Scans existing folders for extension/GPS analysis
+- Quarantines suspicious tiny or corrupt files
+- Scans existing folders for extension/GPS analysis and an optional map view
 
 ## Important Notes
 
 - This project is **not affiliated with Snap Inc.**
-- This app processes files locally on your machine.
-- The app needs internet access only to download your own export media URLs.
-- Snapchat `My Eyes Only` content is not downloaded through normal Memories export flow. Move content into Memories first if you need it included.
+- This app processes files **locally on your machine** - no uploads, no telemetry.
+- **Offline-first:** memory processing needs no internet. The optional GPS map may load map tiles when you open File Checker.
+- **Bundled exports only:** link-only exports (JSON with download URLs but no media in the ZIP) are not supported.
+- Snapchat `My Eyes Only` content is not included in normal Memories export flow. Move content into Memories first if you need it included.
 
 ## Platform Support
 
@@ -56,13 +57,10 @@ Output: `dist/smd/smd.exe` (all-in-one portable folder).
 flowchart TD
     A[Export ZIP] --> B[GUI Import]
     B --> C[memories_history.json parser]
-    C --> D[Download scheduler]
-    D --> E[HTTP downloader]
-    E --> F[Type detector]
-    F --> G[Metadata writer]
-    F --> H[Quarantine]
-    G --> I[Final media output]
-    I --> J[Scan and Map tools]
+    C --> D[Bundled media extractor]
+    D --> E[Overlay merge + metadata]
+    E --> F[Final media library]
+    F --> G[Scan and Map tools]
 ```
 
 ```mermaid
@@ -77,10 +75,11 @@ classDiagram
       +filename
     }
 
-    class DownloaderCore {
-      +download_memory()
-      +download_all()
-      +get_cdn_url()
+    class LocalPipeline {
+      +extract_zip_media()
+      +match_json_rows()
+      +merge_overlays()
+      +apply_metadata()
     }
 
     class Metadata {
@@ -92,14 +91,14 @@ classDiagram
 
     class DesktopGUI {
       +import_export_zip()
-      +start_download()
+      +start_processing()
       +scan_folder()
       +show_map()
     }
 
-    Memory --> DownloaderCore
-    DownloaderCore --> Metadata
-    DesktopGUI --> DownloaderCore
+    Memory --> LocalPipeline
+    LocalPipeline --> Metadata
+    DesktopGUI --> LocalPipeline
     DesktopGUI --> Metadata
 ```
 

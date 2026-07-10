@@ -526,6 +526,15 @@ QLabel#infoBanner {{
     border: 1px solid {p['border']};
     border-radius: 8px;
 }}
+QLabel#offlineBadge {{
+    font-size: {FONT_SIZE_CAPTION}px;
+    font-weight: 600;
+    color: {p['ok']};
+    padding: 2px 8px;
+    background: rgba(45, 138, 62, 0.12);
+    border: 1px solid rgba(45, 138, 62, 0.35);
+    border-radius: 999px;
+}}
 QLabel#detailed_status {{
     color: {p['console_fg']};
     background-color: {p['console_bg']};

@@ -84,8 +84,8 @@ class SessionReport:
             f"({format_bytes(self.staging_bytes)})</li>"
         )
         if self.safe_to_delete_staging:
-            if staging_deleted and staging_freed:
-                lines.append(f"<li>Staging cleaned up automatically ({staging_freed} freed).</li>")
+            if self.staging_deleted and self.staging_freed:
+                lines.append(f"<li>Staging cleaned up automatically ({self.staging_freed} freed).</li>")
             else:
                 lines.append("<li>Staging check passed.</li>")
         else:
@@ -93,7 +93,7 @@ class SessionReport:
         if self.duplicate_groups:
             lines.append(
                 f"<li><b>Duplicate content groups:</b> {self.duplicate_groups:,} "
-                f"- use <b>Review duplicates</b> to copy only non-keepers for inspection</li>"
+                f"- use <b>Review duplicates</b> to keep the copies you want and delete the rest</li>"
             )
         lines.append("</ul>")
         if self.notes:

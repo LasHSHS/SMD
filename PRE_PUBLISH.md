@@ -11,8 +11,8 @@ Use this list before publishing to GitHub, creating a release, or distributing t
 - [ ] `README.md` credits **Las HS** as author with link to https://las-hs.com
 - [ ] About dialog shows author and version (GUI → About)
 - [ ] Clear disclaimer: **not affiliated with Snap Inc.**
-- [ ] Choose and add `LICENSE` file (MIT recommended if open source)
-- [ ] Third-party notices: ffmpeg, PyQt5, Pillow, etc. in `NOTICE` or `README`
+- [x] Choose and add `LICENSE` file (GPLv3 - required because the GUI links PyQt5/GPL)
+- [x] Third-party notices: ffmpeg, PyQt5, Pillow, etc. in `NOTICE`
 
 ---
 
@@ -31,7 +31,7 @@ Use this list before publishing to GitHub, creating a release, or distributing t
 
 - [ ] Full bundled export processed (13k+ files for Las account)
 - [ ] **Verify staging** passes before deleting `technical/staging/`
-- [ ] **Review duplicates** — move extras to `downloads/duplicates/` if any
+- [ ] **Review duplicates** — keep the copies you want; the rest are permanently deleted
 - [ ] Spot-check: merged vs raw on photos with/without overlays
 - [ ] Run on clean Windows 10 and Windows 11 VM (no Python installed)
 - [ ] Test resume after cancel mid-processing
@@ -52,7 +52,7 @@ Use this list before publishing to GitHub, creating a release, or distributing t
 ## 5. Documentation
 
 - [ ] `README.md`: install, first run, export ZIP selection, account name, output folders
-- [ ] Explain folder layout: `downloads/merged`, `downloads/raw`, `technical/`, `downloads/duplicates`
+- [ ] Explain folder layout: `downloads/merged`, `downloads/raw`, `technical/`
 - [ ] Link to Snapchat export steps (Memories + JSON, all ZIP parts)
 - [ ] Troubleshooting: overlays, corrupt files, staging disk space
 
@@ -70,18 +70,18 @@ Use this list before publishing to GitHub, creating a release, or distributing t
 | Unique filenames (no overwrites) | ✅ v3 naming | Unknown | Unknown | ❌ Collisions |
 | Resume / checkpoint | ✅ | Partial | N/A | ❌ |
 | Staging verify before delete | ✅ | ❌ | N/A | ❌ |
-| Duplicate review folder | ✅ User-controlled | ❌ | ❌ | ❌ |
+| Duplicate review + delete | ✅ User-controlled | ❌ | ❌ | ❌ |
 | Output integrity checks | ✅ | Unknown | Unknown | ❌ |
 | Open source / self-hosted | ✅ | ❌ | ❌ | N/A |
 | Windows desktop GUI | ✅ | ✅ | Web | ❌ |
-| CDN legacy export (download links) | ✅ | ✅ | ✅ | ❌ |
+| Link-only export (URLs, no ZIP media) | ❌ Not supported | ✅ | ✅ | ❌ |
 
 **Honest gaps to improve before marketing as “best”:**
 
 1. **UI polish** — theme system added; still PyQt5 widgets (not Flutter/Electron-level polish)
 2. **macOS / Linux** — Windows-first today
 3. **One-click installer** — MSI/Inno Setup vs zip + bat
-4. **Automatic duplicate move** — currently user confirms (by design)
+4. **Duplicate deletion is permanent** — user selects keepers and confirms (by design; no undo)
 5. **HEIC/WebP viewer compatibility** — some Windows apps struggle; JPG is safest for merged
 6. **Video quality vs size** — CRF 0 is lossless but huge; document tradeoff for users
 

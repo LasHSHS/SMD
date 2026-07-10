@@ -13,7 +13,6 @@ datas = []
 binaries = []
 hiddenimports = [
     'smd',
-    'smd.core',
     'smd.models',
     'smd.utils',
     'smd.metadata',
@@ -26,9 +25,6 @@ hiddenimports = [
     'smd.runtime',
     'mutagen',
     'exif',
-    'httpx',
-    'httpcore',
-    'h2',
     'pydantic',
     'pytz',
     'timezonefinder',

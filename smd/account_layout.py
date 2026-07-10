@@ -250,13 +250,7 @@ def folder_size_bytes(path: Path) -> int:
   return total
 
 
-def format_bytes(nbytes: int) -> str:
-    value = float(nbytes)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if value < 1024 or unit == "TB":
-            return f"{value:.1f} {unit}"
-        value /= 1024
-    return f"{value:.1f} TB"
+from smd.media_types import format_bytes  # single shared implementation  # noqa: E402
 
 
 def technical_storage_summary(paths: AccountPaths) -> list[tuple[str, int]]:
@@ -299,7 +293,7 @@ quarantine/  Broken or unusable files isolated during processing.
 
 logs/        Error logs from failed runs.
 
-debug/       CDN download diagnostics
+debug/       Processing diagnostics and logs
 
 Your photos and videos
 ----------------------

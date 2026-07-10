@@ -1,12 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
-
+# Legacy one-file spec — use smd.spec for official all-in-one builds.
 
 a = Analysis(
     ['desktop_gui_pyqt.py'],
     pathex=[],
     binaries=[('tools/exiftool.exe', 'tools/')],
     datas=[],
-    hiddenimports=['smd', 'smd.core', 'smd.models', 'smd.utils', 'smd.metadata', 'tqdm'],
+    hiddenimports=['smd', 'smd.models', 'smd.utils', 'smd.metadata', 'smd.local_pipeline'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

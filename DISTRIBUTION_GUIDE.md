@@ -42,8 +42,8 @@ This script:
 
 - **Not affiliated with Snap Inc.**
 - **All-in-one:** no extra installs
-- **Bundled exports (2026+):** works offline
-- **CDN exports (legacy):** needs internet to download from Snapchat
+- **Bundled exports (2026+):** works fully offline
+- **Link-only exports (legacy JSON with URLs):** not supported - request a new export with media in the ZIP
 - **My Eyes Only** not included in Memories export
 
 ## Code signing (optional)
