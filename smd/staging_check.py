@@ -18,7 +18,7 @@ from smd.local_pipeline import (
     build_deterministic_match_map,
     build_unique_output_names,
 )
-from smd.media_integrity import validate_image_file
+from smd.media_integrity import validate_image_file, validate_video_file
 from smd.utils import load_memories
 
 MIN_OUTPUT_BYTES = 512
@@ -142,9 +142,13 @@ def check_staging_readiness(
     *,
     require_raw: bool = True,
     layout: AccountPaths | None = None,
+    deep_video_check: bool = True,
 ) -> StagingReadinessReport:
     """
     Verify every staged memory has finished outputs before deleting staging/.
+
+    deep_video_check samples merged videos with ffprobe; disable only in tests
+    with synthetic media files.
     """
     paths = layout or resolve_account_paths(account_dir, migrate=False, create=False)
     issues: list[StagingCheckIssue] = []
@@ -356,23 +360,32 @@ def check_staging_readiness(
 
     report.quarantine_count = _count_quarantine(paths.quarantine_dir)
     if report.quarantine_count:
+        # Quarantined files are memories that never reached the library.
+        # Staging is their only remaining source - block deletion until reviewed.
         issues.append(
             StagingCheckIssue(
                 code="quarantine_nonempty",
-                severity="warning",
+                severity="error",
                 message=(
-                    f"{report.quarantine_count} file(s) in technical/quarantine/ - "
-                    "review before deleting staging."
+                    f"{report.quarantine_count} file(s) in technical/quarantine/ never reached "
+                    "your library. Review them before deleting staging - staging is their only copy."
                 ),
             )
         )
 
     corrupt_merged: list[str] = []
+    video_paths: list[Path] = []
     if paths.merged_dir.is_dir():
         for path in paths.merged_dir.iterdir():
-            if path.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
+            suffix = path.suffix.lower()
+            if suffix in (".jpg", ".jpeg", ".png", ".webp"):
+                ok, reason = validate_image_file(path)
+            elif suffix in (".mp4", ".mov", ".m4v", ".mkv", ".avi"):
+                ok, reason = validate_video_file(path)
+                if ok:
+                    video_paths.append(path)
+            else:
                 continue
-            ok, reason = validate_image_file(path)
             if not ok:
                 corrupt_merged.append(path.name)
                 if len(corrupt_merged) <= 20:
@@ -380,7 +393,7 @@ def check_staging_readiness(
                         StagingCheckIssue(
                             code="corrupt_merged",
                             severity="error",
-                            message=f"Corrupt image in merged/: {path.name} ({reason})",
+                            message=f"Corrupt output in merged/: {path.name} ({reason})",
                         )
                     )
     if len(corrupt_merged) > 20:
@@ -388,10 +401,37 @@ def check_staging_readiness(
             StagingCheckIssue(
                 code="corrupt_merged",
                 severity="error",
-                message=f"{len(corrupt_merged)} corrupt images in merged/ - repair before deleting staging.",
+                message=f"{len(corrupt_merged)} corrupt files in merged/ - repair before deleting staging.",
                 stems=corrupt_merged[:20],
             )
         )
+
+    # Deep-check a sample of videos with ffprobe: header checks cannot detect
+    # truncated streams, and staging is the only source to reprocess from.
+    if video_paths and deep_video_check:
+        import random
+
+        from smd.procutil import ffprobe_stream_ok
+
+        sample = video_paths if len(video_paths) <= 25 else random.sample(video_paths, 25)
+        bad_videos = []
+        for vp in sample:
+            verdict = ffprobe_stream_ok(vp)
+            if verdict is False:
+                bad_videos.append(vp.name)
+        if bad_videos:
+            issues.append(
+                StagingCheckIssue(
+                    code="corrupt_video_stream",
+                    severity="error",
+                    message=(
+                        f"{len(bad_videos)} of {len(sample)} sampled videos failed a deep "
+                        f"ffprobe check (e.g. {bad_videos[0]}). Re-run processing before "
+                        "deleting staging."
+                    ),
+                    stems=bad_videos[:20],
+                )
+            )
 
     has_errors = any(i.severity == "error" for i in issues)
     report.issues = issues

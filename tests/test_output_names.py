@@ -63,7 +63,8 @@ def test_reconcile_removes_done_without_output(tmp_path):
     for it in items.values():
         it.main_path = tmp_path / f"{it.stem}-main.mp4"
     names = {"a": "2020-12-14_19-44-01.mp4", "b": "2020-12-14_19-44-01_b.mp4"}
-    (merged / names["a"]).write_bytes(b"x" * 1024)
+    fake_mp4 = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 1016
+    (merged / names["a"]).write_bytes(fake_mp4)
 
     done, skipped, missing = reconcile_checkpoint_with_disk(
         {"a", "b"}, set(), items, names, merged
@@ -98,4 +99,5 @@ def test_build_allowed_output_filenames_includes_resolved_ext(tmp_path):
         names,
     )
     assert "2020-12-14_19-44-01.mp4" in allowed
-    assert "2020-12-14_19-44-01.webp" in allowed
+    # WebP sources are normalized to JPEG in the user-facing library.
+    assert "2020-12-14_19-44-01.jpg" in allowed

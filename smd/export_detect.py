@@ -175,12 +175,14 @@ def analyze_zip_export(seed_path: Path | list[Path]) -> ExportAnalysis:
 
 def extract_json_from_zips(zip_paths: list[Path], dest: Path) -> Path:
     """Extract memories_history.json from first ZIP that contains it."""
+    from smd.fsutil import atomic_write_bytes
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     for zpath in zip_paths:
         with zipfile.ZipFile(zpath, "r") as zf:
             member = next((n for n in zf.namelist() if n.lower().endswith("memories_history.json")), None)
             if member:
                 data = zf.read(member)
-                dest.write_bytes(data)
+                atomic_write_bytes(dest, data)
                 return dest
     raise FileNotFoundError("memories_history.json not found in any ZIP.")

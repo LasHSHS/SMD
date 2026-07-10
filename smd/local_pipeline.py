@@ -149,16 +149,29 @@ def _preferred_output_ext(ext: str) -> str:
 
 
 def _write_main_to_output(work_main: Path, dest: Path) -> None:
-    """Copy or convert main media to dest (WebP sources become JPEG)."""
+    """Copy or convert main media to dest (WebP sources become JPEG). Atomic."""
+    from smd.fsutil import atomic_copy, tmp_sibling
+
     dest_ext = dest.suffix.lower()
     if work_main.suffix.lower() == ".webp" and dest_ext in (".jpg", ".jpeg"):
         from PIL import Image
 
         from smd.overlays import JPEG_QUALITY
 
-        Image.open(work_main).convert("RGB").save(dest, quality=JPEG_QUALITY, subsampling=0)
+        tmp = tmp_sibling(dest)
+        try:
+            Image.open(work_main).convert("RGB").save(
+                tmp, format="JPEG", quality=JPEG_QUALITY, subsampling=0
+            )
+            os.replace(tmp, dest)
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
         return
-    shutil.copy2(work_main, dest)
+    atomic_copy(work_main, dest)
 
 
 def _base_output_name(memory: Memory | None, item: BundledMediaItem, ext: str) -> str:
@@ -261,11 +274,26 @@ def build_allowed_output_filenames(
 _MIN_OUTPUT_BYTES = 512
 
 
+_HEADER_FAMILY = {
+    ".jpg": ".jpg", ".jpeg": ".jpg",
+    ".mp4": ".mp4", ".mov": ".mp4", ".m4v": ".mp4", ".heic": ".mp4",
+}
+
+
 def _output_file_valid(path: Path) -> bool:
+    """Fast validity check: exists, plausible size, and magic bytes match extension."""
     try:
-        return path.is_file() and path.stat().st_size > _MIN_OUTPUT_BYTES
+        if not path.is_file() or path.stat().st_size <= _MIN_OUTPUT_BYTES:
+            return False
+        with open(path, "rb") as f:
+            head = f.read(16)
     except OSError:
         return False
+    detected = detect_ext_from_bytes(head)
+    if detected is None:
+        return False
+    suffix = path.suffix.lower()
+    return _HEADER_FAMILY.get(detected, detected) == _HEADER_FAMILY.get(suffix, suffix)
 
 
 def stem_has_output_on_disk(
@@ -308,10 +336,14 @@ def reconcile_checkpoint_with_disk(
     items: dict[str, BundledMediaItem],
     output_names: dict[str, str],
     merged_dir: Path,
+    raw_dir: Path | None = None,
+    *,
+    keep_raw: bool = False,
 ) -> tuple[set[str], set[str], list[str]]:
     """
-    Drop completed stems whose output file is missing on disk.
-    Prevents skipping work when checkpoint says done but merged/ has no file.
+    Drop completed stems whose output files are missing on disk.
+    Checks merged/ always, and raw/ too when keep_raw is requested, so a
+    checkpoint can never permanently hide a missing raw copy.
     """
     missing: list[str] = []
     for stem in sorted(done_stems):
@@ -322,6 +354,12 @@ def reconcile_checkpoint_with_disk(
             continue
         if not stem_has_output_on_disk(stem, item, planned, merged_dir):
             missing.append(stem)
+            continue
+        if keep_raw and raw_dir is not None:
+            ext = _preferred_output_ext(item.main_ext or item.main_path.suffix.lower())
+            raw_name = _resolve_output_filename(planned, ext)
+            if not _output_file_valid(raw_dir / raw_name):
+                missing.append(stem)
     if missing:
         done_stems = done_stems - set(missing)
     return done_stems, skipped_stems, missing
@@ -357,11 +395,6 @@ def _resolve_output_filename(planned: str, actual_ext: str) -> str:
     return f"{Path(planned).stem}{actual_ext}"
 
 
-def _output_name(memory: Memory | None, item: BundledMediaItem, ext: str) -> str:
-    """Legacy helper - prefer build_unique_output_names for bundled export."""
-    return _base_output_name(memory, item, ext)
-
-
 def _load_checkpoint(path: Path) -> tuple[set[str], set[str], int]:
     if not path.exists():
         return set(), set(), 0
@@ -377,7 +410,10 @@ def _load_checkpoint(path: Path) -> tuple[set[str], set[str], int]:
 
 
 def _save_checkpoint(path: Path, completed: set[str], skipped: set[str]) -> None:
-    path.write_text(
+    from smd.fsutil import atomic_write_text
+
+    atomic_write_text(
+        path,
         json.dumps(
             {
                 "version": CHECKPOINT_VERSION,
@@ -386,7 +422,6 @@ def _save_checkpoint(path: Path, completed: set[str], skipped: set[str]) -> None
             },
             indent=2,
         ),
-        encoding="utf-8",
     )
 
 
@@ -401,11 +436,21 @@ def extract_media_from_zips(
     items: dict[str, BundledMediaItem] = {}
     seen_sizes: dict[str, int] = {}
 
+    from smd.fsutil import tmp_sibling
+
     for zpath in zip_paths:
         stats.zips_processed += 1
         if status:
             status(f"Extracting {zpath.name}...")
-        with zipfile.ZipFile(zpath, "r") as zf:
+        try:
+            zf = zipfile.ZipFile(zpath, "r")
+        except (zipfile.BadZipFile, OSError) as e:
+            raise RuntimeError(
+                f"ZIP part is corrupt or unreadable: {zpath.name} ({e}). "
+                "Re-download this part from Snapchat and run again - "
+                "processing a partial export would silently lose memories."
+            ) from e
+        with zf:
             for name in zf.namelist():
                 if not name.startswith("memories/") or name.endswith("/"):
                     continue
@@ -425,8 +470,17 @@ def extract_media_from_zips(
                     stats.duplicates_skipped += 1
                     continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(name) as src, open(dest, "wb") as out:
-                    shutil.copyfileobj(src, out)
+                tmp = tmp_sibling(dest)
+                try:
+                    with zf.open(name) as src, open(tmp, "wb") as out:
+                        shutil.copyfileobj(src, out)
+                    os.replace(tmp, dest)
+                finally:
+                    if tmp.exists():
+                        try:
+                            tmp.unlink()
+                        except OSError:
+                            pass
                 seen_sizes[fname] = info.file_size
                 stats.files_extracted += 1
 
@@ -601,6 +655,7 @@ def _process_single_item(
                 out.report_entry = {"stem": stem, "status": "quarantine", "error": method}
                 return out
 
+    raw_write_error: str | None = None
     if keep_raw:
         try:
             _write_main_to_output(work_main, raw_out)
@@ -609,8 +664,8 @@ def _process_single_item(
                 ts = memory.date.timestamp()
                 os.utime(raw_out, (ts, ts))
             out.raw_copied = 1
-        except OSError:
-            out.failed = 1
+        except OSError as e:
+            raw_write_error = str(e)
 
     if merge_overlays and item.overlay_path and item.overlay_path.exists():
         ok = False
@@ -666,13 +721,27 @@ def _process_single_item(
             }
             return out
 
-    if keep_raw and raw_out.exists():
-        ok_raw, raw_reason = validate_media_file(raw_out)
+    if keep_raw:
+        # A stem is only "done" when every requested output is valid; otherwise
+        # the checkpoint would permanently hide a missing/corrupt raw copy.
+        ok_raw, raw_reason = (
+            validate_media_file(raw_out) if raw_out.exists() else (False, raw_write_error or "missing")
+        )
         if not ok_raw:
             try:
-                shutil.copy2(work_main, raw_out)
-            except OSError:
-                pass
+                _write_main_to_output(work_main, raw_out)
+                ok_raw, raw_reason = validate_media_file(raw_out)
+            except OSError as e:
+                ok_raw, raw_reason = False, str(e)
+        if not ok_raw:
+            out.failed = 1
+            out.report_entry = {
+                "stem": stem,
+                "status": "raw_output_failed",
+                "error": raw_reason,
+                "output": raw_out.name,
+            }
+            return out
 
     out.done = True
     out.report_entry = {
@@ -810,7 +879,8 @@ def process_bundled_export(
     allowed_outputs = build_allowed_output_filenames(items, output_names)
     if done_stems:
         done_stems, skipped_stems, missing_outputs = reconcile_checkpoint_with_disk(
-            done_stems, skipped_stems, items, output_names, merged_dir
+            done_stems, skipped_stems, items, output_names, merged_dir,
+            raw_dir, keep_raw=keep_raw,
         )
         if missing_outputs:
             status(
