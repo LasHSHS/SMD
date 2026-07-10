@@ -17,9 +17,9 @@ PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64
 AllowNoIcons=yes
 ShowLanguageDialog=no
-LicenseFile=README.md
+LicenseFile=LICENSE
 SetupIconFile=icon.ico
-UninstallDisplayIcon={app}\smd.exe
+UninstallDisplayIcon={app}\SMD.exe
 DisableWelcomePage=no
 
 ; Modern UI settings - using built-in defaults
@@ -35,14 +35,14 @@ Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 ; Create Start Menu shortcuts
-Name: "{group}\Snapchat Memories Downloader"; Filename: "{app}\smd.exe"; IconFilename: "{app}\icon.ico"; Comment: "Download your Snapchat memories"; WorkingDir: "{app}"
+Name: "{group}\Snapchat Memories Downloader"; Filename: "{app}\SMD.exe"; IconFilename: "{app}\icon.ico"; Comment: "Download your Snapchat memories"; WorkingDir: "{app}"
 Name: "{group}\Uninstall Snapchat Memories Downloader"; Filename: "{uninstallexe}"
 ; Optional: Create desktop shortcut
-Name: "{userdesktop}\Snapchat Memories Downloader"; Filename: "{app}\smd.exe"; IconFilename: "{app}\icon.ico"; Comment: "Download your Snapchat memories"; WorkingDir: "{app}"
+Name: "{userdesktop}\Snapchat Memories Downloader"; Filename: "{app}\SMD.exe"; IconFilename: "{app}\icon.ico"; Comment: "Download your Snapchat memories"; WorkingDir: "{app}"
 
 [Run]
 ; Ask user if they want to launch the app after installation
-Filename: "{app}\smd.exe"; Description: "Launch Snapchat Memories Downloader"; Flags: nowait postinstall skipifsilent unchecked; WorkingDir: "{app}"
+Filename: "{app}\SMD.exe"; Description: "Launch Snapchat Memories Downloader"; Flags: nowait postinstall skipifsilent unchecked; WorkingDir: "{app}"
 
 [InstallDelete]
 ; Clean up old versions

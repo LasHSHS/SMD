@@ -22,4 +22,4 @@ Expected files after fetch:
 
 FFmpeg is licensed under LGPL/GPL. Source and license: https://ffmpeg.org/legal.html
 
-The official SMD installer must include FFmpeg license notices (see `DISTRIBUTION_GUIDE.md`).
+The official SMD installer must include FFmpeg license notices (see `agent-docs/DISTRIBUTION_GUIDE.md` and the root `NOTICE`).

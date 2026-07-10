@@ -3,7 +3,7 @@
 SMD all-in-one Windows build (portable folder).
 
 Includes: Python runtime, PyQt5 + WebEngine, ffmpeg, timezone data, folium assets.
-End users run dist/smd/smd.exe — no Python, pip, or separate tool installs.
+End users run dist/smd/SMD.exe — no Python, pip, or separate tool installs.
 """
 from pathlib import Path
 
@@ -101,7 +101,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='smd',
+    name='SMD',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

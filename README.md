@@ -41,9 +41,9 @@ No Python, pip, ffmpeg, or other tools required in the official Windows build.
 
 ## Build & Release
 
-See **`ALL_IN_ONE_PACKAGING.md`** for the canonical packaging rules (bundle everything; file size is not a concern).
+See **`agent-docs/ALL_IN_ONE_PACKAGING.md`** for the canonical packaging rules (bundle everything; file size is not a concern).
 
-See **`DISTRIBUTION_GUIDE.md`** for the release checklist.
+See **`agent-docs/DISTRIBUTION_GUIDE.md`** for the release checklist.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build_smd.ps1
