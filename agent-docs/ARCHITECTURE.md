@@ -217,6 +217,14 @@ impossible during a run (fixed 2026-07-11).
 launching SMD while it's already running brings the existing window to
 front instead of opening a second one.
 
+**Keep-awake during a run**: `_set_keep_awake()` wraps Win32
+`SetThreadExecutionState` to stop the system/display from sleeping between
+run start and the end of post-run verification/finalize (all the
+`_set_keep_awake(False)` call sites mark true "run is fully done" points,
+not just when `_set_run_lockout(False)` fires - that happens earlier, before
+verification). See DECISIONS.md, "Keep system/display awake for the
+duration of a run" (2026-07-16).
+
 ## Module map (`smd/`)
 
 | Module | Responsibility |

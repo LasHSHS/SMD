@@ -11,6 +11,32 @@ relevant file/function instead of pasting code.
 
 ---
 
+### 2026-07-16 - Keep system/display awake for the duration of a run
+
+**What**: `_set_keep_awake()` (`desktop_gui_pyqt.py`) calls Win32
+`SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)`
+when a run starts, and clears it (`ES_CONTINUOUS` alone) at every exit path:
+setup failure, cancel/fail in `on_download_finished`, the early-return in
+`_show_completion_summary`, both `_on_completion_finalize_*` callbacks, and
+`closeEvent` as a last-resort safety net. Scope is "run start" through "post-run
+verification/finalize done" - not just the extract/merge phase - since that
+tail work (`StagingVerifyWorker`, `CompletionFinalizeWorker`) can also run
+for minutes on a large library.
+
+**Why**: user with an AMD RX 6900 XT reported SMD getting dramatically slower
+partway through a multi-hour run, coinciding with the monitor going to sleep;
+`Ctrl+Shift+Win+B` (restarts the GPU driver) was their existing workaround.
+Checked the actual run log (`run_activity_20260716_204525.log`, Las account,
+13,988 files): throughput was a steady ~60-90 files/min for the first ~2.5
+hours, then dropped to ~10-45 files/min from roughly 23:25 to 00:20 - the
+window spanning the monitor-sleep report (~23:01) and the driver restart
+(~23:32) - before recovering. That's a real, measurable 2-4x slowdown, not
+just a perception. Rather than try to detect/recover from the AMD post-wake
+render slowdown (a driver-level issue outside SMD's control), it's simpler
+and fully sufficient to just never let the display/system sleep while SMD
+has active work in flight. Deliberately does NOT keep the machine awake
+outside of a run - normal power saving is untouched the rest of the time.
+
 ### 2026-07-15 - raw/merged hardlinked when identical, instead of processed/copied twice
 
 **What**: `_process_single_item()` (`smd/local_pipeline.py`) now has a fast

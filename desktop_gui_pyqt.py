@@ -646,17 +646,21 @@ class ProcessingShieldOverlay(QWidget):
         self.hide()
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(24, 24, 24, 24)
+        outer.setContentsMargins(32, 32, 32, 32)
         outer.addStretch(2)
 
         panel = QFrame()
         panel.setObjectName('contentPanel')
+        # Wide enough that the multi-line hint never wraps into a tall, clipped
+        # column on typical desktop windows. Height stays content-driven.
+        panel.setMinimumWidth(560)
+        panel.setMaximumWidth(720)
         from smd.theme import enable_styled_surface
 
         enable_styled_surface(panel)
         panel_lay = QVBoxLayout(panel)
-        panel_lay.setContentsMargins(28, 24, 28, 24)
-        panel_lay.setSpacing(14)
+        panel_lay.setContentsMargins(40, 36, 40, 36)
+        panel_lay.setSpacing(18)
 
         title = QLabel('Verifying your files…')
         title.setProperty('class', 'sectionHeader')
@@ -667,6 +671,9 @@ class ProcessingShieldOverlay(QWidget):
         self.hint_label.setWordWrap(True)
         self.hint_label.setAlignment(Qt.AlignCenter)
         self.hint_label.setProperty('class', 'caption')
+        # Keep the hint from collapsing so multi-line text stays fully visible.
+        self.hint_label.setMinimumHeight(80)
+        self.hint_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         panel_lay.addWidget(self.hint_label)
 
         outer.addWidget(panel, 0, Qt.AlignCenter)
@@ -1999,6 +2006,40 @@ def _media_caption(media_path: Path) -> str:
     return size_text
 
 
+class FittedPixmapLabel(QLabel):
+    """QLabel that always scales its source pixmap to fit its current size.
+
+    Used by the duplicate compare dialog so large photos never force a
+    horizontal scrollbar - the image shrinks to the panel instead of the
+    panel growing to the image."""
+
+    def __init__(self, pixmap: QPixmap, parent=None):
+        super().__init__(parent)
+        self._source = pixmap
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumSize(1, 1)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._refit()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._refit()
+
+    def _refit(self) -> None:
+        if self._source is None or self._source.isNull():
+            return
+        avail = self.size()
+        if avail.width() < 2 or avail.height() < 2:
+            return
+        scaled = self._source.scaled(
+            avail, Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+        self.setPixmap(scaled)
+
+
 class DuplicateCompareDialog(QDialog):
     """Side-by-side enlarged preview for duplicate files in one group."""
 
@@ -2013,13 +2054,17 @@ class DuplicateCompareDialog(QDialog):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
 
-        hint = QLabel('Scroll inside each panel to inspect details. Files are byte-identical.')
+        hint = QLabel(
+            'Each preview scales to fit its panel. Files are byte-identical.'
+        )
         hint.setWordWrap(True)
         root.addWidget(hint)
 
         outer_scroll = QScrollArea()
         outer_scroll.setWidgetResizable(True)
         outer_scroll.setFrameShape(QScrollArea.NoFrame)
+        # Only needed when there are many columns; each image itself is
+        # fitted so individual panels never force a horizontal scrollbar.
         outer_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         outer_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
@@ -2036,6 +2081,7 @@ class DuplicateCompareDialog(QDialog):
             from smd.theme import enable_styled_surface
 
             enable_styled_surface(col)
+            col.setMinimumWidth(280)
             col_lay = QVBoxLayout(col)
             col_lay.setSpacing(8)
             col_lay.setContentsMargins(12, 12, 12, 12)
@@ -2045,12 +2091,12 @@ class DuplicateCompareDialog(QDialog):
             title.setProperty('class', 'sectionHeader')
             col_lay.addWidget(title)
 
-            preview_scroll = QScrollArea()
-            preview_scroll.setWidgetResizable(True)
-            preview_scroll.setFrameShape(QScrollArea.NoFrame)
-            preview_scroll.setMinimumSize(360, 420)
-
+            # No nested scroll area: FittedPixmapLabel fills this slot and
+            # scales to whatever space the column has, so zoomed-in crops
+            # and horizontal scrollbars cannot appear.
             preview_host = QWidget()
+            preview_host.setMinimumHeight(360)
+            preview_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             preview_lay = QVBoxLayout(preview_host)
             preview_lay.setContentsMargins(0, 0, 0, 0)
             preview_lay.setAlignment(Qt.AlignCenter)
@@ -2061,8 +2107,7 @@ class DuplicateCompareDialog(QDialog):
             preview_lay.addWidget(placeholder)
             self._preview_targets[str(path)] = (preview_lay, path)
 
-            preview_scroll.setWidget(preview_host)
-            col_lay.addWidget(preview_scroll, 1)
+            col_lay.addWidget(preview_host, 1)
             row_lay.addWidget(col, 1)
 
         outer_scroll.setWidget(row_host)
@@ -2088,6 +2133,8 @@ class DuplicateCompareDialog(QDialog):
     def _start_compare_preview_loader(self) -> None:
         if not self._preview_targets:
             return
+        # Load a high-res source; FittedPixmapLabel scales it down to the
+        # panel at display time so quality stays good without overflowing.
         jobs = [(Path(path_key), 1280) for path_key in self._preview_targets]
         self._preview_worker = DuplicatePreviewWorker(jobs)
         self._preview_worker.preview_ready.connect(self._on_compare_preview_ready)
@@ -2107,10 +2154,8 @@ class DuplicateCompareDialog(QDialog):
         if pil_img is not None:
             pixmap = _qpixmap_from_pil(pil_img)
             if pixmap is not None and not pixmap.isNull():
-                img_label = QLabel()
-                img_label.setPixmap(pixmap)
-                img_label.setAlignment(Qt.AlignCenter)
-                preview_lay.addWidget(img_label)
+                img_label = FittedPixmapLabel(pixmap)
+                preview_lay.addWidget(img_label, 1)
                 return
 
         if path.suffix.lower() in ('.mp4', '.mov', '.m4v', '.mkv', '.avi'):
@@ -2960,6 +3005,7 @@ class DownloaderGUI(QMainWindow):
     def closeEvent(self, event):
         """Clean up temporary map HTML files when the app closes."""
         self._cleanup_map_html_temps()
+        self._set_keep_awake(False)
         event.accept()
 
     def _track_map_html_temp(self, path: str | Path) -> None:
@@ -4020,6 +4066,33 @@ class DownloaderGUI(QMainWindow):
                 effect.setOpacity(0.4)
             else:
                 section.setGraphicsEffect(None)
+
+    def _set_keep_awake(self, active: bool) -> None:
+        """Prevent Windows from sleeping the system or display while a run
+        (including the post-run verification/finalize passes) is in
+        progress, then release it as soon as that work ends.
+
+        Motivated by a user report: some AMD GPUs render at a fraction of
+        normal speed for a while after the display wakes from sleep (a
+        known driver quirk - Ctrl+Shift+Win+B, which restarts the graphics
+        driver, is the common workaround). If SMD is mid-run when the
+        monitor sleeps, that post-wake slowdown hits ffmpeg too. Keeping
+        the display on for the run's duration avoids the wake cycle
+        entirely instead of trying to detect/react to it. See
+        agent-docs/DECISIONS.md, "Keep system/display awake during a run".
+        """
+        if sys.platform != 'win32':
+            return
+        try:
+            import ctypes
+
+            ES_CONTINUOUS = 0x80000000
+            ES_SYSTEM_REQUIRED = 0x00000001
+            ES_DISPLAY_REQUIRED = 0x00000002
+            flags = ES_CONTINUOUS | (ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED if active else 0)
+            ctypes.windll.kernel32.SetThreadExecutionState(flags)
+        except Exception:
+            pass
 
     def _update_run_readiness(self) -> None:
         """Enable Start only when export is valid and account name is usable."""
@@ -5516,6 +5589,7 @@ class DownloaderGUI(QMainWindow):
             self.download_btn.setText('Cancel')
             self.download_btn.setToolTip('Stop the current operation.')
             self._set_run_lockout(True)
+            self._set_keep_awake(True)
 
             merge_overlays = True
             keep_raw = self.save_raw_chk.isChecked()
@@ -5555,6 +5629,7 @@ class DownloaderGUI(QMainWindow):
             self.download_btn.setText('Start full processing')
             self._refresh_after_processing_actions()
             self._set_run_lockout(False)
+            self._set_keep_awake(False)
             QMessageBox.critical(self, 'Error', str(e))
 
     def on_local_progress(self, current, total):
@@ -5637,6 +5712,10 @@ class DownloaderGUI(QMainWindow):
                 pass
             self._show_completion_summary()
         else:
+            # Success continues into verification/finalize below, which still
+            # needs the display kept awake - only release it here on the
+            # cancelled/failed path, where no further background work runs.
+            self._set_keep_awake(False)
             if getattr(self, 'download_cancelled', False):
                 self._apply_status(self.status_label, '⏹ Stopped. Click Start to resume with the same account name.', "warn")
             else:
@@ -5828,6 +5907,7 @@ class DownloaderGUI(QMainWindow):
             self._log_completion_error("resolve account paths", exc, None)
             if hasattr(self, 'processing_shield'):
                 self.processing_shield.hide()
+            self._set_keep_awake(False)
             self._show_minimal_completion_message(account_name, None)
             return
 
@@ -5847,9 +5927,9 @@ class DownloaderGUI(QMainWindow):
 
         if hasattr(self, 'processing_shield'):
             self.processing_shield.hint_label.setText(
-                'Double-checking every saved file before showing the summary. '
-                'Large libraries with many videos can take a few minutes - '
-                'your files are already saved; this step only verifies them.'
+                'Double-checking every saved file before showing the summary.\n'
+                'Large libraries can take a few minutes.\n'
+                'Your files are already saved - this step only verifies them.'
             )
             self.processing_shield.show_over()
 
@@ -5877,8 +5957,9 @@ class DownloaderGUI(QMainWindow):
 
         if hasattr(self, 'processing_shield'):
             self.processing_shield.hint_label.setText(
-                'Preparing your summary. Large libraries can take a minute - '
-                'your files are already saved.'
+                'Preparing your summary.\n'
+                'Large libraries can take a minute.\n'
+                'Your files are already saved.'
             )
             self.processing_shield.show_over()
 
@@ -5895,6 +5976,7 @@ class DownloaderGUI(QMainWindow):
         paths = self._completion_paths
         if hasattr(self, 'processing_shield'):
             self.processing_shield.hide()
+        self._set_keep_awake(False)
         try:
             dlg = SessionSummaryDialog(report, paths.library_root, paths.reports_dir, self)
             dlg.exec_()
@@ -5912,6 +5994,7 @@ class DownloaderGUI(QMainWindow):
         self._log_completion_error("build session summary", RuntimeError(message), paths)
         if hasattr(self, 'processing_shield'):
             self.processing_shield.hide()
+        self._set_keep_awake(False)
         self._show_minimal_completion_message(account_name, paths)
         QTimer.singleShot(
             0,
