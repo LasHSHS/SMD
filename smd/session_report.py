@@ -36,6 +36,7 @@ class SessionReport:
     safe_to_delete_staging: bool = False
     staging_deleted: bool = False
     staging_freed: str = ""
+    staging_kept_by_setting: bool = False
     quality_note: str = ""
     notes: list[str] = field(default_factory=list)
 
@@ -83,7 +84,12 @@ class SessionReport:
             f"<li><b>Staging:</b> {self.staging_files:,} working files "
             f"({format_bytes(self.staging_bytes)})</li>"
         )
-        if self.safe_to_delete_staging:
+        if self.staging_kept_by_setting:
+            lines.append(
+                "<li>Staging kept because \"Keep staging media files\" is turned on - "
+                "the integrity check was skipped and technical/staging/ was left in place.</li>"
+            )
+        elif self.safe_to_delete_staging:
             if self.staging_deleted and self.staging_freed:
                 lines.append(f"<li>Staging cleaned up automatically ({self.staging_freed} freed).</li>")
             else:
@@ -117,6 +123,8 @@ def build_session_report(
     staging_deleted: bool = False,
     staging_freed: str = "",
     layout: AccountPaths | None = None,
+    readiness=None,
+    skip_staging_check: bool = False,
 ) -> SessionReport:
     paths = layout or resolve_account_paths(account_dir, migrate=False, create=False)
     account_name = paths.account_dir.name
@@ -137,7 +145,14 @@ def build_session_report(
             corrupt.append(p.name)
 
     duplicate_groups = load_cached_duplicate_group_count(paths)
-    readiness = check_staging_readiness(account_dir, layout=paths, require_raw=require_raw)
+    if skip_staging_check:
+        readiness = None
+    elif readiness is None:
+        # check_staging_readiness() ffprobes every video in staging, which is
+        # expensive on large libraries - callers that already ran it (e.g. the
+        # post-run StagingVerifyWorker) should pass the result in instead of
+        # paying for a second full scan here.
+        readiness = check_staging_readiness(account_dir, layout=paths, require_raw=require_raw)
 
     default_steps = steps or [
         "Detected export format",
@@ -168,12 +183,15 @@ def build_session_report(
         webp_outputs=webp_count,
         staging_bytes=folder_size_bytes(paths.staging_dir),
         merged_bytes=folder_size_bytes(paths.merged_dir),
-        safe_to_delete_staging=readiness.safe_to_delete,
+        safe_to_delete_staging=readiness.safe_to_delete if readiness is not None else False,
         staging_deleted=staging_deleted,
         staging_freed=staging_freed,
+        staging_kept_by_setting=skip_staging_check,
         quality_note=(
             "Photos are saved at maximum JPEG quality. "
-            "Video overlays use lossless encoding when Snapchat filters are merged."
+            "Video overlays are re-encoded at visually lossless quality when "
+            "Snapchat filters are merged, without the huge file sizes of true "
+            "lossless encoding."
         ),
     )
     if stats and stats.failed:

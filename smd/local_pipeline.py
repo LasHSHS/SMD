@@ -10,13 +10,18 @@ import zipfile
 from collections import defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from smd.export_detect import discover_export_zip_parts, extract_json_from_zips
 from smd.account_layout import AccountPaths, normalize_account_dir, resolve_account_paths, LEGACY_STAGING
-from smd.metadata import apply_metadata
+from smd.metadata import (
+    apply_metadata,
+    copy_video_with_metadata,
+    read_video_capture_time,
+    video_metadata_ffmpeg_flags,
+)
 from smd.models import Memory
 from smd.overlays import merge_image_overlay, merge_video_overlay
 from smd.utils import detect_ext_from_bytes, load_memories
@@ -121,10 +126,29 @@ def _memory_media_id(memory: Memory) -> str | None:
 def build_deterministic_match_map(
     items: dict[str, BundledMediaItem],
     memories: list[Memory],
+    *,
+    probe_workers: int | None = None,
 ) -> dict[str, Memory | None]:
     """
-    Pair bundled files to JSON rows deterministically:
-    same (date, media-type) bucket, items sorted by UID stem, JSON sorted by time.
+    Pair bundled files to JSON rows within the same (date, media-type)
+    bucket, used when a file has no Snapchat media id to match on (see
+    ``build_match_map``).
+
+    Videos: sorted by each file's own embedded ``creation_time`` (read
+    straight off the staged file, before SMD writes anything) when ffprobe
+    can read one. This is the phone's own recorded capture instant, and it
+    reliably tracks the same chronological order as the JSON rows' ``Date``
+    field even though the two are never identical (Date lags capture by a
+    roughly consistent 15-40s "saved to memories" delay). Any video ffprobe
+    can't read falls back to UID-stem order, sorted after all timed videos
+    so it can't silently displace one that IS correctly ordered.
+
+    Images: Snapchat strips EXIF entirely from exported photos - there is
+    no per-file signal to sort by, so this remains UID-stem order and can
+    still mismatch same-day multi-photo bursts. See agent-docs/DECISIONS.md
+    ("2026-07-14 - video matching uses each file's own creation_time") for
+    the investigation that found this and why photos can't be fully fixed.
+
     Stable across runs and resume - no FIFO consumption drift.
     """
     mem_groups: dict[tuple[str, str], list[Memory]] = defaultdict(list)
@@ -140,8 +164,43 @@ def build_deterministic_match_map(
             continue
         mtype = _normalize_media_type(_media_type_from_ext(item.main_ext))
         item_groups[(item.date_prefix, mtype)].append((stem, item))
-    for group in item_groups.values():
-        group.sort(key=lambda x: x[0])
+
+    # Only bother probing videos in buckets that actually have >1 item -
+    # a lone video in its (day, type) bucket has nothing to be mis-ordered
+    # against, so skip the ffprobe call entirely for the common case.
+    video_stems_to_probe = [
+        stem
+        for (_, mtype), group in item_groups.items()
+        if mtype == "video" and len(group) > 1
+        for stem, _ in group
+    ]
+    capture_times: dict[str, datetime | None] = {}
+    if video_stems_to_probe:
+        paths = {stem: items[stem].main_path for stem in video_stems_to_probe}
+        workers = min(16, max(1, probe_workers or (os.cpu_count() or 8)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                stem: pool.submit(read_video_capture_time, path)
+                for stem, path in paths.items()
+            }
+            for stem, fut in futures.items():
+                try:
+                    capture_times[stem] = fut.result()
+                except Exception:
+                    capture_times[stem] = None
+
+    _NEVER = datetime.max.replace(tzinfo=timezone.utc)
+    for (_, mtype), group in item_groups.items():
+        if mtype == "video" and len(group) > 1:
+            group.sort(
+                key=lambda x: (
+                    capture_times.get(x[0]) is None,
+                    capture_times.get(x[0]) or _NEVER,
+                    x[0],
+                )
+            )
+        else:
+            group.sort(key=lambda x: x[0])
 
     match_map: dict[str, Memory | None] = {}
     for key, item_list in item_groups.items():
@@ -154,6 +213,8 @@ def build_deterministic_match_map(
 def build_match_map(
     items: dict[str, BundledMediaItem],
     memories: list[Memory],
+    *,
+    probe_workers: int | None = None,
 ) -> dict[str, Memory | None]:
     """Match bundled files to JSON rows by Snapchat media id when possible."""
     match_map: dict[str, Memory | None] = {
@@ -167,7 +228,13 @@ def build_match_map(
 
     used: set[int] = set()
     unmatched_stems: list[str] = []
-    for stem, item in items.items():
+    # Sort by stem (not raw dict/filesystem order) so that when more than one
+    # staged item shares a uid, the same one always "wins" the match - dict
+    # order here follows directory enumeration order, which is not guaranteed
+    # stable across runs/resumes on all filesystems, and a different winner
+    # would send a different item through the positional fallback below,
+    # producing a different (and wrong, if re-verified later) output name.
+    for stem, item in sorted(items.items()):
         if not item.main_path:
             continue
         uid = item.uid.lower()
@@ -181,7 +248,9 @@ def build_match_map(
     if unmatched_stems:
         unmatched_items = {s: items[s] for s in unmatched_stems}
         remaining = [m for m in memories if id(m) not in used]
-        fallback = build_deterministic_match_map(unmatched_items, remaining)
+        fallback = build_deterministic_match_map(
+            unmatched_items, remaining, probe_workers=probe_workers
+        )
         for stem, mem in fallback.items():
             match_map[stem] = mem
 
@@ -706,32 +775,150 @@ def _process_single_item(
                 out.report_entry = {"stem": stem, "status": "quarantine", "error": method}
                 return out
 
+    is_video = item.main_ext in (".mp4", ".mov", ".m4v")
+    want_meta = bool(apply_meta and memory)
+    has_overlay = bool(merge_overlays and item.overlay_path and item.overlay_path.exists())
+
+    # Fast path: with keep_raw on and no overlay to burn into merged/, raw/
+    # and merged/ end up byte-identical - process once (into raw_out) and
+    # hardlink merged_out instead of a second full copy/ffmpeg remux. This
+    # never runs for overlay items (they need genuinely different bytes in
+    # each folder) or when keep_raw is off (nothing to link from), so the
+    # overlay-merge branch below is completely unaffected by this path. See
+    # agent-docs/DECISIONS.md ("2026-07 - raw/merged hardlinked when
+    # identical") for why later "repairs" here must stay atomic (os.replace-
+    # based), never an in-place truncate+write, to avoid silently corrupting
+    # the other hardlinked name.
+    if keep_raw and not has_overlay:
+        if item.overlay_path is None and merge_overlays:
+            out.overlays_missing = 1
+
+        raw_write_error: str | None = None
+        try:
+            raw_container_done = False
+            if is_video and want_meta:
+                if ffmpeg_sem:
+                    with ffmpeg_sem:
+                        raw_container_done = copy_video_with_metadata(work_main, raw_out, memory)
+                else:
+                    raw_container_done = copy_video_with_metadata(work_main, raw_out, memory)
+            if not raw_container_done:
+                _write_main_to_output(work_main, raw_out)
+            if want_meta:
+                apply_metadata(
+                    raw_out, memory, raw_out.suffix, container_date_done=raw_container_done
+                )
+                ts = memory.date.timestamp()
+                os.utime(raw_out, (ts, ts))
+        except OSError as e:
+            raw_write_error = str(e)
+
+        ok_raw, raw_reason = (
+            validate_media_file(raw_out) if raw_out.exists() else (False, raw_write_error or "missing")
+        )
+        if not ok_raw:
+            try:
+                _write_main_to_output(work_main, raw_out)
+                if want_meta:
+                    apply_metadata(raw_out, memory, raw_out.suffix)
+                    ts = memory.date.timestamp()
+                    os.utime(raw_out, (ts, ts))
+                ok_raw, raw_reason = validate_media_file(raw_out)
+            except OSError as e:
+                ok_raw, raw_reason = False, str(e)
+        if not ok_raw:
+            out.failed = 1
+            out.report_entry = {
+                "stem": stem,
+                "status": "raw_output_failed",
+                "error": raw_reason,
+                "output": raw_out.name,
+            }
+            return out
+        out.raw_copied = 1
+
+        from smd.fsutil import atomic_copy, link_or_copy
+
+        link_or_copy(raw_out, merged_out)
+        ok_merged, reason = validate_media_file(merged_out)
+        if not ok_merged:
+            # Atomic (os.replace-based) on purpose, never an in-place write -
+            # raw_out may still be a hardlinked twin of merged_out at this
+            # point, and an in-place rewrite would silently mutate raw_out's
+            # bytes too instead of just fixing merged_out.
+            try:
+                atomic_copy(raw_out, merged_out)
+                ok_merged, reason = validate_media_file(merged_out)
+            except OSError as e:
+                ok_merged, reason = False, str(e)
+        if not ok_merged:
+            out.failed = 1
+            out.report_entry = {
+                "stem": stem,
+                "status": "invalid_output",
+                "error": reason,
+                "output": merged_out.name,
+            }
+            return out
+
+        if want_meta:
+            out.metadata_applied = 1
+
+        out.done = True
+        out.report_entry = {
+            "stem": stem,
+            "status": "ok",
+            "merged": bool(item.overlay_path),
+            "output": merged_out.name,
+            "json_date": memory.date.isoformat() if memory else None,
+        }
+        return out
+
     raw_write_error: str | None = None
     if keep_raw:
         try:
-            _write_main_to_output(work_main, raw_out)
-            if apply_meta and memory:
-                apply_metadata(raw_out, memory, raw_out.suffix)
+            raw_container_done = False
+            if is_video and want_meta:
+                if ffmpeg_sem:
+                    with ffmpeg_sem:
+                        raw_container_done = copy_video_with_metadata(work_main, raw_out, memory)
+                else:
+                    raw_container_done = copy_video_with_metadata(work_main, raw_out, memory)
+            if not raw_container_done:
+                _write_main_to_output(work_main, raw_out)
+            if want_meta:
+                apply_metadata(
+                    raw_out, memory, raw_out.suffix, container_date_done=raw_container_done
+                )
                 ts = memory.date.timestamp()
                 os.utime(raw_out, (ts, ts))
             out.raw_copied = 1
         except OSError as e:
             raw_write_error = str(e)
 
+    # When a video needs its date/GPS embedded, fold the -metadata flags into
+    # whichever ffmpeg pass already touches the file (overlay burn, or a
+    # metadata-aware copy for non-overlay videos) instead of paying for a
+    # second, separate remux of the whole file afterward.
+    merged_container_done = False
     if merge_overlays and item.overlay_path and item.overlay_path.exists():
         ok = False
         if item.main_ext in (".jpg", ".jpeg", ".png", ".webp"):
             ok = merge_image_overlay(work_main, item.overlay_path, merged_out)
-        elif item.main_ext in (".mp4", ".mov", ".m4v"):
+        elif is_video:
+            meta_flags = video_metadata_ffmpeg_flags(memory) if want_meta else None
             if ffmpeg_sem:
                 with ffmpeg_sem:
                     ok = merge_video_overlay(
-                        work_main, item.overlay_path, merged_out, threads=ffmpeg_threads
+                        work_main, item.overlay_path, merged_out,
+                        threads=ffmpeg_threads, metadata_flags=meta_flags,
                     )
             else:
                 ok = merge_video_overlay(
-                    work_main, item.overlay_path, merged_out, threads=ffmpeg_threads
+                    work_main, item.overlay_path, merged_out,
+                    threads=ffmpeg_threads, metadata_flags=meta_flags,
                 )
+            merged_container_done = ok and meta_flags is not None
         if ok:
             out.merged = 1
         else:
@@ -740,11 +927,20 @@ def _process_single_item(
     else:
         if item.overlay_path is None and merge_overlays:
             out.overlays_missing = 1
-        _write_main_to_output(work_main, merged_out)
+        if is_video and want_meta:
+            if ffmpeg_sem:
+                with ffmpeg_sem:
+                    merged_container_done = copy_video_with_metadata(work_main, merged_out, memory)
+            else:
+                merged_container_done = copy_video_with_metadata(work_main, merged_out, memory)
+        if not merged_container_done:
+            _write_main_to_output(work_main, merged_out)
 
-    if apply_meta and memory:
+    if want_meta:
         try:
-            apply_metadata(merged_out, memory, merged_out.suffix)
+            apply_metadata(
+                merged_out, memory, merged_out.suffix, container_date_done=merged_container_done
+            )
             ts = memory.date.timestamp()
             os.utime(merged_out, (ts, ts))
             out.metadata_applied = 1
@@ -903,7 +1099,9 @@ def process_bundled_export(
         status,
         legacy_staging_dir=paths.downloads_dir / LEGACY_STAGING,
     )
-    match_map = build_match_map(items, memories)
+    match_map = build_match_map(
+        items, memories, probe_workers=min(16, max(1, int(max_workers or 8)))
+    )
     matched_count = sum(1 for v in match_map.values() if v is not None)
     status(f"Matched {matched_count}/{len(match_map)} files to JSON metadata.")
 
@@ -1057,7 +1255,7 @@ def process_bundled_export(
             if out.done or out.skipped:
                 processed_count += 1
                 since_checkpoint += 1
-            if checkpoint_path and since_checkpoint >= 10:
+            if checkpoint_path and since_checkpoint >= 25:
                 _save_checkpoint(checkpoint_path, done_stems, skipped_stems)
                 since_checkpoint = 0
             limit_hit = limit > 0 and processed_count >= limit
@@ -1124,7 +1322,7 @@ def process_bundled_export(
             paths,
             move_to_folder=False,
             status_callback=status,
-            hash_workers=max(2, min(8, max_workers)),
+            hash_workers=max(2, min(16, max_workers)),
         )
         if dup_report.duplicate_groups:
             status(
@@ -1141,7 +1339,7 @@ def process_bundled_export(
         pass
 
     report = {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "checkpoint_version": CHECKPOINT_VERSION,
         "stats": asdict(stats),
         "collision_groups": stats.collision_groups,

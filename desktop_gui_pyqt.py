@@ -51,12 +51,12 @@ import atexit
 import psutil
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QFileDialog, QLineEdit,
-                             QTextEdit, QTextBrowser, QComboBox, QSpinBox, QCheckBox, QTabWidget, QProgressBar, QToolTip, QSizePolicy, QSplashScreen, QGroupBox, QGridLayout,
-                             QRadioButton, QButtonGroup, QFrame, QPlainTextEdit, QMenu, QScrollArea)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer, QObject, pyqtSlot, QSettings, QCoreApplication, QSize
+                             QTextEdit, QTextBrowser, QComboBox, QSpinBox, QCheckBox, QTabWidget, QTabBar, QProgressBar, QToolTip, QSizePolicy, QSplashScreen, QGroupBox, QGridLayout,
+                             QRadioButton, QButtonGroup, QFrame, QPlainTextEdit, QMenu, QScrollArea, QLayout, QGraphicsOpacityEffect)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer, QObject, pyqtSlot, QSettings, QCoreApplication, QSize, QRect
 from PyQt5.QtGui import QFont, QIcon, QColor, QDesktopServices, QCursor, QPixmap, QPainter
 from PyQt5.QtWidgets import QMessageBox
 from PyQt5.QtWidgets import QDialog
@@ -206,6 +206,87 @@ class StreamRedirector(QObject):
         return False
 
 
+class FlowLayout(QLayout):
+    """Lays out child widgets left-to-right, wrapping to a new row when the
+    next item would not fit. Unlike QHBoxLayout, it never demands more width
+    than it is given, so a scroll area hosting it only ever needs to scroll
+    vertically - never horizontally."""
+
+    def __init__(self, parent=None, margin: int = 0, spacing: int = 12):
+        super().__init__(parent)
+        if parent is not None:
+            self.setContentsMargins(margin, margin, margin, margin)
+        self._item_list = []
+        self._spacing = spacing
+
+    def __del__(self):
+        while self.count():
+            self.takeAt(0)
+
+    def addItem(self, item):
+        self._item_list.append(item)
+
+    def count(self) -> int:
+        return len(self._item_list)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._item_list):
+            return self._item_list[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._item_list):
+            return self._item_list.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect) -> None:
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._item_list:
+            size = size.expandedTo(item.minimumSize())
+        left, top, right, bottom = self.getContentsMargins()
+        size += QSize(left + right, top + bottom)
+        return size
+
+    def _do_layout(self, rect, test_only: bool) -> int:
+        left, top, right, bottom = self.getContentsMargins()
+        effective_rect = rect.adjusted(left, top, -right, -bottom)
+        x = effective_rect.x()
+        y = effective_rect.y()
+        line_height = 0
+        spacing = self._spacing
+
+        for item in self._item_list:
+            item_size = item.sizeHint()
+            next_x = x + item_size.width() + spacing
+            if next_x - spacing > effective_rect.right() and line_height > 0:
+                x = effective_rect.x()
+                y = y + line_height + spacing
+                next_x = x + item_size.width() + spacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(x, y, item_size.width(), item_size.height()))
+            x = next_x
+            line_height = max(line_height, item_size.height())
+
+        return y + line_height - rect.y() + bottom
+
+
 class DocBrowser(QTextBrowser):
     """QTextBrowser that reflows HTML to the full widget width."""
 
@@ -315,9 +396,27 @@ class WidthAwareColumn(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         QTimer.singleShot(0, self._apply_content_width)
 
+    def _reference_width(self) -> int:
+        """Width to size against. Prefer the main QTabWidget over self.width():
+        once _content's minimum width is raised, self.width() can never report a
+        smaller number afterwards (the layout won't shrink us below our own
+        content's minimum), which would otherwise wedge this column at whatever
+        width it first happened to compute during the very first layout pass.
+        QTabWidget#mainTabs is also reliable for columns that live on a tab page
+        that isn't the current page yet - a hidden page's own width can be
+        stale, but the always-visible tab widget itself is up to date."""
+        top = self.window()
+        tabs = top.findChild(QTabWidget, 'mainTabs') if top is not None else None
+        if tabs is not None and tabs.width() > 0:
+            return tabs.width()
+        parent = self.parentWidget()
+        if parent is not None and parent.width() > 0:
+            return parent.width()
+        return self.width()
+
     def _apply_content_width(self) -> None:
         left, _top, right, _bottom = self._margins
-        available = max(0, self.width() - left - right)
+        available = max(0, self._reference_width() - left - right)
         floor = self._min_width
         if self._max_width > 0:
             if available >= floor:
@@ -531,11 +630,16 @@ class MediaViewer(QWidget):
 
 
 class ProcessingShieldOverlay(QWidget):
-    """Blocks the UI with a dark tint while processing runs."""
+    """Full-window dark tint used only for the brief, non-cancelable, read-only
+    post-run verification step (see StagingVerifyWorker). While a run is
+    actively processing, Setup/Performance/After-processing are dimmed
+    per-section instead (see _set_run_lockout) so the Run section's
+    Start/Cancel button and the live dashboard stay clickable and scrollable
+    - this overlay used to cover the whole window during the active run too,
+    which blocked scrolling the dashboard and made SMD look unresponsive."""
 
-    def __init__(self, parent=None, *, on_cancel=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._on_cancel = on_cancel
         self.setObjectName('processingShield')
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setStyleSheet('background-color: rgba(0, 0, 0, 165);')
@@ -554,7 +658,7 @@ class ProcessingShieldOverlay(QWidget):
         panel_lay.setContentsMargins(28, 24, 28, 24)
         panel_lay.setSpacing(14)
 
-        title = QLabel('Processing your memories…')
+        title = QLabel('Verifying your files…')
         title.setProperty('class', 'sectionHeader')
         title.setAlignment(Qt.AlignCenter)
         panel_lay.addWidget(title)
@@ -565,16 +669,6 @@ class ProcessingShieldOverlay(QWidget):
         self.hint_label.setProperty('class', 'caption')
         panel_lay.addWidget(self.hint_label)
 
-        cancel_btn = QPushButton('Cancel')
-        cancel_btn.setObjectName('runAction')
-        cancel_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        if on_cancel:
-            cancel_btn.clicked.connect(on_cancel)
-        row = QHBoxLayout()
-        row.addStretch(1)
-        row.addWidget(cancel_btn)
-        row.addStretch(1)
-        panel_lay.addLayout(row)
         outer.addWidget(panel, 0, Qt.AlignCenter)
         outer.addStretch(3)
 
@@ -1606,6 +1700,157 @@ class StagingCheckWorker(QThread):
             self.error.emit(str(exc))
 
 
+class DuplicateScanWorker(QThread):
+    """Hash merged/ off the UI thread so 'Review duplicates' never freezes
+    the window, even on large libraries."""
+    progress = pyqtSignal(str)
+    finished = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, paths):
+        super().__init__()
+        self.paths = paths
+
+    def run(self):
+        try:
+            from smd.duplicates import scan_content_duplicates
+
+            report = scan_content_duplicates(
+                self.paths,
+                move_to_folder=False,
+                status_callback=self.progress.emit,
+            )
+            self.finished.emit(report)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class StagingVerifyWorker(QThread):
+    """Runs the post-run staging integrity check off the UI thread.
+
+    check_staging_readiness() ffprobes *every* video by design (an earlier
+    fix traded a 25-file sample for full certainty before staging/ gets
+    deleted) - for a library with thousands of videos that can take minutes,
+    and running it directly on the GUI thread made SMD look frozen right
+    after a run finished, even though every file was already saved safely."""
+    finished_ok = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, account_dir, paths, require_raw):
+        super().__init__()
+        self.account_dir = account_dir
+        self.paths = paths
+        self.require_raw = require_raw
+
+    def run(self):
+        try:
+            from smd.staging_check import check_staging_readiness
+
+            readiness = check_staging_readiness(
+                self.account_dir, layout=self.paths, require_raw=self.require_raw
+            )
+            self.finished_ok.emit(readiness)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class CompletionFinalizeWorker(QThread):
+    """Delete staging (when safe) and build the session report off the UI thread.
+
+    build_session_report() Pillow-validates every merged photo and walks the
+    output tree for folder sizes - minutes of work on large libraries if run
+    on the GUI thread right after StagingVerifyWorker returns."""
+    finished_ok = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, paths, stats, keep_raw, readiness, skipped_by_setting, *, success=True):
+        super().__init__()
+        self.paths = paths
+        self.stats = stats
+        self.keep_raw = keep_raw
+        self.readiness = readiness
+        self.skipped_by_setting = skipped_by_setting
+        self.success = success
+
+    def run(self):
+        try:
+            from smd.account_layout import format_bytes
+            from smd.session_report import build_session_report, save_session_report
+            from smd.staging_check import delete_staging_folder
+
+            staging_deleted = False
+            staging_freed = ""
+            if (
+                not self.skipped_by_setting
+                and self.readiness is not None
+                and self.readiness.safe_to_delete
+            ):
+                ok, _msg = delete_staging_folder(
+                    self.paths.account_dir, report=self.readiness, layout=self.paths
+                )
+                if ok:
+                    staging_deleted = True
+                    staging_freed = format_bytes(self.readiness.staging_bytes)
+
+            report = build_session_report(
+                self.paths.account_dir,
+                stats=self.stats,
+                success=self.success,
+                require_raw=self.keep_raw,
+                staging_deleted=staging_deleted,
+                staging_freed=staging_freed,
+                layout=self.paths,
+                readiness=self.readiness,
+                skip_staging_check=self.skipped_by_setting,
+            )
+            save_session_report(self.paths, report)
+            self.finished_ok.emit(report)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class TechnicalStorageWorker(QThread):
+    """Scan technical folder sizes off the UI thread (Technical view only)."""
+    finished_ok = pyqtSignal(object, object)
+    error = pyqtSignal(str)
+
+    def __init__(self, paths, account_name: str):
+        super().__init__()
+        self.paths = paths
+        self.account_name = account_name
+
+    def run(self):
+        try:
+            from smd.account_layout import technical_storage_summary
+
+            rows = technical_storage_summary(self.paths)
+            self.finished_ok.emit(self.account_name, rows)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+
+class DuplicatePreviewWorker(QThread):
+    """Load duplicate-review thumbnails and captions off the UI thread."""
+    preview_ready = pyqtSignal(str, object, str)
+    finished_all = pyqtSignal()
+
+    def __init__(self, media_jobs: list[tuple[Path, int]]):
+        super().__init__()
+        self.media_jobs = media_jobs
+
+    def run(self):
+        for media_path, max_dim in self.media_jobs:
+            key = str(media_path)
+            try:
+                img = _pil_preview_image(media_path, max_dim)
+                caption = _media_caption(media_path)
+            except Exception:
+                img = None
+                caption = ''
+            self.preview_ready.emit(key, img, caption)
+        self.finished_all.emit()
+
+
 def _video_frame_pil_image(video_path: Path) -> Image.Image | None:
     """Extract a single preview frame from a video file."""
     from smd.ffmpeg_bundle import resolve_ffmpeg
@@ -1672,10 +1917,8 @@ def _pil_preview_image(media_path: Path, max_dim: int) -> Image.Image | None:
         return None
 
 
-def _pixmap_for_media(media_path: Path, max_dim: int) -> QPixmap | None:
-    img = _pil_preview_image(media_path, max_dim)
-    if img is None:
-        return None
+def _qpixmap_from_pil(img: Image.Image) -> QPixmap | None:
+    """Convert a PIL image to QPixmap on the GUI thread."""
     try:
         from PIL import ImageQt
 
@@ -1697,6 +1940,63 @@ def _pixmap_for_media(media_path: Path, max_dim: int) -> QPixmap | None:
         return QPixmap.fromImage(qimg)
     except Exception:
         return None
+
+
+def _pixmap_for_media(media_path: Path, max_dim: int) -> QPixmap | None:
+    img = _pil_preview_image(media_path, max_dim)
+    if img is None:
+        return None
+    return _qpixmap_from_pil(img)
+
+
+def _video_duration_seconds(video_path: Path) -> float | None:
+    """Clip length in seconds via ffprobe, or None if unavailable."""
+    from smd.ffmpeg_bundle import resolve_ffprobe
+    from smd.procutil import subprocess_flags
+
+    ffprobe = resolve_ffprobe()
+    if not ffprobe:
+        return None
+    try:
+        startupinfo, creationflags = subprocess_flags()
+        result = subprocess.run(
+            [
+                ffprobe, '-v', 'quiet', '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1', str(video_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+        )
+        return float(result.stdout.strip())
+    except Exception:
+        return None
+
+
+def _format_clip_duration(seconds: float) -> str:
+    total = int(round(seconds))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def _media_caption(media_path: Path) -> str:
+    """One-line size (+ duration for videos) caption for a media card."""
+    from smd.media_types import format_bytes, is_video_file
+
+    try:
+        size_text = format_bytes(media_path.stat().st_size)
+    except OSError:
+        size_text = '? size'
+    if is_video_file(media_path):
+        duration = _video_duration_seconds(media_path)
+        if duration is not None:
+            return f"{_format_clip_duration(duration)} - {size_text}"
+    return size_text
 
 
 class DuplicateCompareDialog(QDialog):
@@ -1729,6 +2029,7 @@ class DuplicateCompareDialog(QDialog):
         row_lay.setSpacing(16)
         row_lay.setContentsMargins(0, 0, 0, 0)
 
+        self._preview_targets: dict[str, tuple[QVBoxLayout, Path]] = {}
         for name, path in files:
             col = QFrame()
             col.setObjectName('contentPanel')
@@ -1754,28 +2055,11 @@ class DuplicateCompareDialog(QDialog):
             preview_lay.setContentsMargins(0, 0, 0, 0)
             preview_lay.setAlignment(Qt.AlignCenter)
 
-            pixmap = _pixmap_for_media(path, 1280)
-            if pixmap is not None and not pixmap.isNull():
-                img_label = QLabel()
-                img_label.setPixmap(pixmap)
-                img_label.setAlignment(Qt.AlignCenter)
-                preview_lay.addWidget(img_label)
-            elif path.suffix.lower() in ('.mp4', '.mov', '.m4v', '.mkv', '.avi'):
-                video_note = QLabel('Video preview unavailable.\nOpen with your default player to inspect.')
-                video_note.setAlignment(Qt.AlignCenter)
-                video_note.setWordWrap(True)
-                preview_lay.addWidget(video_note)
-                open_btn = QPushButton('Open video')
-                open_btn.setObjectName('toolbarBtn')
-                open_btn.clicked.connect(
-                    lambda _checked=False, p=path: QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
-                )
-                preview_lay.addWidget(open_btn, alignment=Qt.AlignCenter)
-            else:
-                missing = QLabel('Preview unavailable for this file.')
-                missing.setAlignment(Qt.AlignCenter)
-                missing.setWordWrap(True)
-                preview_lay.addWidget(missing)
+            placeholder = QLabel('Loading preview…')
+            placeholder.setAlignment(Qt.AlignCenter)
+            placeholder.setWordWrap(True)
+            preview_lay.addWidget(placeholder)
+            self._preview_targets[str(path)] = (preview_lay, path)
 
             preview_scroll.setWidget(preview_host)
             col_lay.addWidget(preview_scroll, 1)
@@ -1799,6 +2083,55 @@ class DuplicateCompareDialog(QDialog):
         apply_scroll_area_theme(outer_scroll, dark=dark)
         enable_styled_surface(row_host)
         paint_widget_surface(row_host, dark=dark, role='bg')
+        self._start_compare_preview_loader()
+
+    def _start_compare_preview_loader(self) -> None:
+        if not self._preview_targets:
+            return
+        jobs = [(Path(path_key), 1280) for path_key in self._preview_targets]
+        self._preview_worker = DuplicatePreviewWorker(jobs)
+        self._preview_worker.preview_ready.connect(self._on_compare_preview_ready)
+        self._preview_worker.start()
+
+    def _on_compare_preview_ready(self, path_key: str, pil_img, caption: str) -> None:
+        entry = self._preview_targets.get(path_key)
+        if not entry:
+            return
+        preview_lay, path = entry
+        while preview_lay.count():
+            item = preview_lay.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        if pil_img is not None:
+            pixmap = _qpixmap_from_pil(pil_img)
+            if pixmap is not None and not pixmap.isNull():
+                img_label = QLabel()
+                img_label.setPixmap(pixmap)
+                img_label.setAlignment(Qt.AlignCenter)
+                preview_lay.addWidget(img_label)
+                return
+
+        if path.suffix.lower() in ('.mp4', '.mov', '.m4v', '.mkv', '.avi'):
+            video_note = QLabel(
+                f"Video preview unavailable.\n{caption or 'Unknown size'}\n"
+                "Open with your default player to inspect."
+            )
+            video_note.setAlignment(Qt.AlignCenter)
+            video_note.setWordWrap(True)
+            preview_lay.addWidget(video_note)
+            open_btn = QPushButton('Play video')
+            open_btn.setObjectName('toolbarBtn')
+            open_btn.clicked.connect(
+                lambda _checked=False, p=path: QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
+            )
+            preview_lay.addWidget(open_btn, alignment=Qt.AlignCenter)
+        else:
+            missing = QLabel('Preview unavailable for this file.')
+            missing.setAlignment(Qt.AlignCenter)
+            missing.setWordWrap(True)
+            preview_lay.addWidget(missing)
 
 
 class SessionSummaryDialog(QDialog):
@@ -1853,6 +2186,7 @@ class DuplicateReviewDialog(QDialog):
         self.report = report
         self._dark = dark
         self._group_ui: list[tuple[str, list, QButtonGroup]] = []
+        self._preview_targets: dict[str, tuple[QPushButton, QLabel]] = {}
 
         self.setWindowTitle('Review duplicates - choose keepers')
         self.setMinimumWidth(960)
@@ -1875,6 +2209,9 @@ class DuplicateReviewDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
+        # Cards use a wrapping FlowLayout (below), so this view only ever
+        # needs to scroll vertically - never horizontally.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         inner = QWidget()
         inner.setObjectName('dialogBody')
         inner_layout = QVBoxLayout(inner)
@@ -1901,8 +2238,11 @@ class DuplicateReviewDialog(QDialog):
             btn_group = QButtonGroup(box)
             btn_group.setExclusive(False)
 
-            cards_row = QHBoxLayout()
-            cards_row.setSpacing(12)
+            # FlowLayout wraps cards onto additional rows instead of forcing
+            # the group (and thus the whole dialog) to grow wider than the
+            # available space - so groups with several duplicates never
+            # require a horizontal scrollbar.
+            cards_row = FlowLayout(spacing=12)
             for e in entries_sorted:
                 media_path = self.paths.merged_dir / e.filename
                 cards_row.addWidget(
@@ -1913,8 +2253,7 @@ class DuplicateReviewDialog(QDialog):
                         btn_group,
                         checked=(e.filename == default_keeper),
                         compare_files=file_paths,
-                    ),
-                    1,
+                    )
                 )
             box_layout.addLayout(cards_row)
 
@@ -1953,6 +2292,33 @@ class DuplicateReviewDialog(QDialog):
         apply_btn.clicked.connect(self._on_apply_clicked)
         cancel_btn.clicked.connect(self.reject)
         self._apply_theme(scroll, inner)
+        self._start_preview_loader()
+
+    def _start_preview_loader(self) -> None:
+        if not self._preview_targets:
+            return
+        jobs = [(Path(path_key), 148) for path_key in self._preview_targets]
+        self._preview_worker = DuplicatePreviewWorker(jobs)
+        self._preview_worker.preview_ready.connect(self._on_preview_ready)
+        self._preview_worker.start()
+
+    def _on_preview_ready(self, path_key: str, pil_img, caption: str) -> None:
+        widgets = self._preview_targets.get(path_key)
+        if not widgets:
+            return
+        thumb_btn, info_lbl = widgets
+        if pil_img is not None:
+            pixmap = _qpixmap_from_pil(pil_img)
+            if pixmap is not None and not pixmap.isNull():
+                thumb_btn.setIcon(QIcon(pixmap))
+                thumb_btn.setIconSize(QSize(148, 148))
+                thumb_btn.setText('')
+            else:
+                thumb_btn.setText('No preview')
+        else:
+            thumb_btn.setText('No preview')
+        if caption:
+            info_lbl.setText(caption)
 
     def _build_duplicate_card(
         self,
@@ -1979,14 +2345,21 @@ class DuplicateReviewDialog(QDialog):
         thumb_btn.setToolTip('Click to compare side by side')
         thumb_btn.setFixedSize(156, 156)
         thumb_btn.setFocusPolicy(Qt.NoFocus)
-        pixmap = _pixmap_for_media(media_path, 148)
-        if pixmap is not None and not pixmap.isNull():
-            thumb_btn.setIcon(QIcon(pixmap))
-            thumb_btn.setIconSize(QSize(148, 148))
-        else:
-            thumb_btn.setText('No preview')
+        thumb_btn.setText('Loading preview…')
         thumb_btn.clicked.connect(lambda _checked=False, files=compare_files: self._open_compare(files))
         lay.addWidget(thumb_btn, alignment=Qt.AlignCenter)
+
+        from smd.media_types import is_video_file
+
+        is_video = is_video_file(media_path)
+        if is_video:
+            play_btn = QPushButton('Play video')
+            play_btn.setObjectName('toolbarBtn')
+            play_btn.setToolTip('Open this file in your default video player')
+            play_btn.clicked.connect(
+                lambda _checked=False, p=media_path: QDesktopServices.openUrl(QUrl.fromLocalFile(str(p)))
+            )
+            lay.addWidget(play_btn, alignment=Qt.AlignCenter)
 
         keeper = QCheckBox('Keep this one')
         keeper.setProperty('dup_filename', filename)
@@ -1999,6 +2372,12 @@ class DuplicateReviewDialog(QDialog):
         name_lbl.setAlignment(Qt.AlignCenter)
         name_lbl.setProperty('class', 'caption')
         lay.addWidget(name_lbl)
+
+        info_lbl = QLabel('Loading…')
+        info_lbl.setAlignment(Qt.AlignCenter)
+        info_lbl.setProperty('class', 'caption')
+        lay.addWidget(info_lbl)
+        self._preview_targets[str(media_path)] = (thumb_btn, info_lbl)
         return card
 
     def _on_keep_both(self, sha_prefix: str, btn_group: QButtonGroup) -> None:
@@ -2095,9 +2474,9 @@ class DuplicateReviewDialog(QDialog):
                 except OSError as exc:
                     errors.append(f'{label}/{name}: {exc}')
 
-        ts = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        ts = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
         selection_report = {
-            'generated_at_utc': datetime.utcnow().isoformat() + 'Z',
+            'generated_at_utc': datetime.now(timezone.utc).isoformat(),
             'account_name': self.account_name,
             'source_folders': [str(folder) for _, folder in target_folders],
             'action': 'permanent_delete',
@@ -2114,6 +2493,8 @@ class DuplicateReviewDialog(QDialog):
         except OSError:
             out_json = None
 
+        self._update_cached_duplicate_report(group_selections)
+
         msg = f'Permanently deleted {deleted} duplicate file(s).'
         if skipped_all_unselected:
             msg += (
@@ -2129,6 +2510,32 @@ class DuplicateReviewDialog(QDialog):
             msg += f'\n\nReport:\n{out_json}'
         QMessageBox.information(self, 'Duplicates deleted', msg)
         self.accept()
+
+    def _update_cached_duplicate_report(self, group_selections: dict[str, dict]) -> None:
+        """Drop resolved groups from technical/reports/duplicates_report.json.
+
+        Groups where files were actually deleted are down to one keeper now,
+        so they're no longer duplicates - removing them keeps the cache
+        accurate for the next time "Review duplicates" is opened, without
+        needing to re-hash merged/ from scratch.
+        """
+        try:
+            from smd.duplicates import load_cached_duplicate_report
+
+            cached = load_cached_duplicate_report(self.paths)
+            if cached is None:
+                return
+            resolved_prefixes = {
+                prefix for prefix, sel in group_selections.items() if sel.get('deleted')
+            }
+            if not resolved_prefixes:
+                return
+            cached.entries = [e for e in cached.entries if e.sha256 not in resolved_prefixes]
+            cached.duplicate_groups = len({e.sha256 for e in cached.entries})
+            report_path = self.paths.reports_dir / 'duplicates_report.json'
+            report_path.write_text(json.dumps(cached.to_dict(), indent=2), encoding='utf-8')
+        except Exception:
+            pass
 
 
 class LocalExportWorker(QThread):
@@ -2306,7 +2713,10 @@ class LiveRunDashboard(QWidget):
         self.log.setObjectName("runActivityLog")
         self.log.setReadOnly(True)
         self.log.setMinimumHeight(160)
-        self.log.setMaximumBlockCount(600)
+        # 0 = unlimited - a full run can produce several thousand lines and
+        # users need to scroll all the way back to the start, not just the
+        # last few hundred lines.
+        self.log.setMaximumBlockCount(0)
         root.addWidget(self.log, 1)
 
     def _stat_card(self, title: str, initial: str) -> tuple[QFrame, QLabel]:
@@ -2382,6 +2792,44 @@ class LiveRunDashboard(QWidget):
             apply_status_property(self.status_line, status_kind)
 
 
+class _MainTabBar(QTabBar):
+    """Sizes each tab directly from its own text metrics + a fixed, generous
+    padding, instead of relying on the QSS `padding`/`min-width` properties
+    on `QTabBar::tab`.
+
+    Those QSS properties alone were not enough: even with
+    `setElideMode(Qt.ElideNone)`, "Save memories" (the longest label) was
+    still rendered hard-clipped (no "..." - literal missing letters) in a
+    real screenshot. `elideMode` only controls whether the *painter* adds an
+    ellipsis when told to draw text in a too-small rect; it does not force
+    the *layout* to size that rect correctly in the first place, and
+    Qt's stylesheet-driven `sizeFromContents()` for `QTabBar::tab` does not
+    reliably honor custom padding for compound/OR-ed selectors like the one
+    this app uses (`QTabWidget#mainTabs > QTabBar::tab, QTabWidget#resultsTabs
+    > QTabBar::tab`). Computing the size hint directly here sidesteps that
+    whole class of QSS/style-engine quirk.
+    """
+
+    EXTRA_PADDING_PX = 56
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Qt's Fusion style paints a separate "tab bar base" line (the
+        # PE_FrameTabBarBase primitive) connecting the bar to the pane -
+        # this is independent of the QSS border on QTabBar::tab, so
+        # `border-top: none` in the stylesheet cannot remove it. This is
+        # the one line across the whole tab strip that survived every
+        # QSS-only attempt; setDrawBase(False) is the actual Qt API for it.
+        self.setDrawBase(False)
+
+    def tabSizeHint(self, index: int) -> QSize:
+        from PyQt5.QtGui import QFontMetrics
+
+        base = super().tabSizeHint(index)
+        text_width = QFontMetrics(self.font()).horizontalAdvance(self.tabText(index))
+        return QSize(max(base.width(), text_width + self.EXTRA_PADDING_PX), base.height())
+
+
 class DownloaderGUI(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -2395,7 +2843,7 @@ class DownloaderGUI(QMainWindow):
         self.dark_mode_enabled = True  # resolved theme is dark
         self._map_html_temp_files: list[Path] = []
         self.init_ui()
-        self.processing_shield = ProcessingShieldOverlay(self, on_cancel=self.cancel_download)
+        self.processing_shield = ProcessingShieldOverlay(self)
         self.stdout_redirector = StreamRedirector(self.append_debug_message)
         sys.stdout = self.stdout_redirector
         sys.stderr = self.stdout_redirector
@@ -2424,6 +2872,13 @@ class DownloaderGUI(QMainWindow):
         self._load_and_apply_theme()
         self._apply_technical_view_ui()
 
+        self._storage_debounce_timer = QTimer(self)
+        self._storage_debounce_timer.setSingleShot(True)
+        self._storage_debounce_timer.timeout.connect(self._run_technical_storage_scan)
+        self._pending_storage_account = ''
+        self._storage_scan_generation = 0
+        self._duplicate_scan_auto_open = False
+
     def _technical_view_enabled(self) -> bool:
         return bool(
             getattr(self, 'technical_view_chk', None) and self.technical_view_chk.isChecked()
@@ -2443,16 +2898,33 @@ class DownloaderGUI(QMainWindow):
         if name:
             self.update_download_path_label(name)
 
-    def _apply_technical_view_ui(self) -> None:
-        technical = self._technical_view_enabled()
-        for widget in (
+    def _on_keep_staging_changed(self, _state: int = 0) -> None:
+        QSettings('SnapchatMemories', 'Downloader').setValue(
+            'keep_staging_files', self.keep_staging_chk.isChecked()
+        )
+
+    def _technical_widgets(self) -> list:
+        """Every control that only appears once 'Technical view' is enabled.
+        Kept in one place so visibility and the red 'not for average users'
+        styling always stay in sync."""
+        return [
             getattr(self, 'open_technical_btn', None),
             getattr(self, 'verify_staging_btn', None),
             getattr(self, 'open_debug_btn', None),
             getattr(self, 'technical_storage_label', None),
-        ):
+            getattr(self, 'keep_staging_chk', None),
+            getattr(self, 'keep_staging_hint', None),
+        ]
+
+    def _apply_technical_view_ui(self) -> None:
+        from smd.theme import technical_text_style
+
+        technical = self._technical_view_enabled()
+        style = technical_text_style(getattr(self, 'dark_mode_enabled', False))
+        for widget in self._technical_widgets():
             if widget is not None:
                 widget.setVisible(technical)
+                widget.setStyleSheet(style)
         if hasattr(self, '_rebuild_process_controls_grid'):
             self._rebuild_process_controls_grid()
         self._refresh_after_processing_actions()
@@ -2654,6 +3126,52 @@ class DownloaderGUI(QMainWindow):
             btn.style().unpolish(btn)
             btn.style().polish(btn)
 
+    def _refresh_content_columns(self, _index: int = 0) -> None:
+        """A tab page that was hidden inside the QStackedWidget doesn't receive
+        real resize events while inactive, so if the window was resized while
+        a tab was in the background, its WidthAwareColumn can be sized for a
+        stale width. Recompute for the newly-shown page so it always matches
+        the window's current width."""
+        page = self.tabs.currentWidget()
+        if page is None:
+            return
+        for column in page.findChildren(WidthAwareColumn):
+            column._apply_content_width()
+
+    def _on_main_tab_changed(self, index: int) -> None:
+        self._refresh_content_columns(index)
+        if index == self._tab_file_checker:
+            # Start the expensive WebEngine init as soon as the user looks at
+            # this tab, not only once they click Scan - gives it a head
+            # start so it's more likely ready by the time a map is actually
+            # rendered.
+            self._ensure_map_view()
+
+    def _ensure_map_view(self) -> None:
+        """Lazily create the real map widget (QWebEngineView) on first need.
+
+        See the comment where self.map_view is set to None in init_ui for
+        why this is deferred instead of built eagerly at startup.
+        """
+        if self.map_view is not None:
+            return
+        if WEB_ENGINE_AVAILABLE and QWebEngineView is not None:
+            self.map_view = QWebEngineView()
+        else:
+            self.map_view = QTextBrowser()
+            self.map_view.setOpenExternalLinks(True)
+            self.map_view.setHtml(
+                "<h3>GPS Map requires Qt WebEngine</h3>"
+                "<p>The map will open in your default browser after rendering.</p>"
+            )
+        self._map_layout.replaceWidget(self._map_placeholder, self.map_view)
+        self._map_placeholder.deleteLater()
+        self._map_layout.setStretch(0, 1)
+        if WEB_ENGINE_AVAILABLE and isinstance(self.map_view, QWebEngineView):
+            # Give the freshly-created WebEngineView something to show;
+            # previously this ran unconditionally 200ms after startup.
+            QTimer.singleShot(0, self.init_default_map)
+
     def _add_nav_button(self, label: str, index: int) -> QPushButton:
         btn = QPushButton(label)
         btn.setObjectName('NavBtn')
@@ -2782,6 +3300,10 @@ class DownloaderGUI(QMainWindow):
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName('mainTabs')
+        # Must be set before any addTab() calls - QTabWidget only accepts a
+        # replacement tab bar while empty. See _MainTabBar's docstring for
+        # why QSS padding/min-width alone wasn't a reliable enough fix.
+        self.tabs.setTabBar(_MainTabBar())
 
         # --- Tab 1: Guide (request export from Snapchat) ---
         guide_tab = self._make_tab_page()
@@ -2901,7 +3423,7 @@ class DownloaderGUI(QMainWindow):
         )
         output_hint.setWordWrap(True)
         output_hint.setProperty('class', 'caption')
-        self.save_raw_chk = QCheckBox('Also save without filters (optional, more disk space)')
+        self.save_raw_chk = QCheckBox('Also save without filters')
         self.save_raw_chk.setChecked(False)
         self.save_raw_chk.setToolTip(
             'Keeps a second copy of each memory without filters, stickers, or text overlays. '
@@ -2909,7 +3431,7 @@ class DownloaderGUI(QMainWindow):
         )
         self.save_raw_chk.stateChanged.connect(self._on_save_raw_changed)
 
-        self.technical_view_chk = QCheckBox('Technical view (advanced folders and troubleshooting)')
+        self.technical_view_chk = QCheckBox('Technical view')
         self.technical_view_chk.setToolTip(
             'Shows staging, checkpoints, reports, and other working data used by SMD. '
             'Leave off for a simple Desktop folder with just your memories.'
@@ -2917,6 +3439,28 @@ class DownloaderGUI(QMainWindow):
         stored_tv = QSettings('SnapchatMemories', 'Downloader').value('technical_view', False)
         self.technical_view_chk.setChecked(str(stored_tv).lower() in ('1', 'true', 'yes'))
         self.technical_view_chk.stateChanged.connect(self._on_technical_view_changed)
+
+        self.keep_staging_chk = QCheckBox('Keep staging media files')
+        self.keep_staging_chk.setToolTip(
+            "Skips the automatic integrity check and cleanup of technical/staging/ "
+            "after a run, so the original extracted files stick around until you "
+            "delete them yourself. Turn this off to let SMD verify and free that "
+            "disk space automatically once a run finishes successfully."
+        )
+        stored_keep_staging = QSettings('SnapchatMemories', 'Downloader').value(
+            'keep_staging_files', False
+        )
+        self.keep_staging_chk.setChecked(
+            str(stored_keep_staging).lower() in ('1', 'true', 'yes')
+        )
+        self.keep_staging_chk.stateChanged.connect(self._on_keep_staging_changed)
+        self.keep_staging_hint = QLabel(
+            "Staging is the working copy SMD extracts from your export before "
+            "building merged/ and raw/. Leave unchecked to auto-verify and free "
+            "that disk space once a run succeeds."
+        )
+        self.keep_staging_hint.setWordWrap(True)
+        self.keep_staging_hint.setProperty('class', 'caption')
 
         run_box, run_lay = self._section('Run')
         run_body = QHBoxLayout()
@@ -2932,6 +3476,8 @@ class DownloaderGUI(QMainWindow):
         run_options_col.addWidget(output_hint)
         run_options_col.addWidget(self.save_raw_chk)
         run_options_col.addWidget(self.technical_view_chk)
+        run_options_col.addWidget(self.keep_staging_chk)
+        run_options_col.addWidget(self.keep_staging_hint)
         run_options_col.addStretch(1)
         run_body.addLayout(run_options_col, 1)
         run_body.addWidget(self.download_btn, 0, Qt.AlignVCenter | Qt.AlignRight)
@@ -2958,6 +3504,15 @@ class DownloaderGUI(QMainWindow):
         self.open_folder_btn.setObjectName('toolbarBtn')
         self.open_folder_btn.setToolTip('Your finished photos and videos (with Snapchat filters)')
         self.open_folder_btn.clicked.connect(self.open_download_folder)
+
+        self.open_gallery_btn = QPushButton('View as gallery')
+        self.open_gallery_btn.setObjectName('toolbarBtn')
+        self.open_gallery_btn.setToolTip(
+            "Opens your first memory in the Windows Photos app - from there, use the "
+            "arrow keys or on-screen arrows to flip through every photo and video in the "
+            "folder, or start a slideshow. No separate gallery to maintain."
+        )
+        self.open_gallery_btn.clicked.connect(self.open_gallery_view)
 
         self.open_technical_btn = QPushButton('Open technical folder')
         self.open_technical_btn.setObjectName('toolbarBtn')
@@ -2988,10 +3543,11 @@ class DownloaderGUI(QMainWindow):
         self.open_debug_btn.clicked.connect(self.open_debug_folder)
 
         after_grid.addWidget(self.open_folder_btn, 0, 0)
-        after_grid.addWidget(self.review_duplicates_btn, 0, 1)
-        after_grid.addWidget(self.open_technical_btn, 1, 0)
-        after_grid.addWidget(self.verify_staging_btn, 1, 1)
-        after_grid.addWidget(self.open_debug_btn, 2, 0)
+        after_grid.addWidget(self.open_gallery_btn, 0, 1)
+        after_grid.addWidget(self.review_duplicates_btn, 1, 0)
+        after_grid.addWidget(self.open_technical_btn, 1, 1)
+        after_grid.addWidget(self.verify_staging_btn, 2, 0)
+        after_grid.addWidget(self.open_debug_btn, 2, 1)
         after_lay.addLayout(after_grid)
 
         self._setup_section = setup_box
@@ -3135,23 +3691,25 @@ class DownloaderGUI(QMainWindow):
         map_widget = QFrame()
         map_widget.setObjectName('contentPanel')
         enable_styled_surface(map_widget)
-        map_layout = QHBoxLayout(map_widget)
-        map_layout.setContentsMargins(8, 8, 8, 8)
-        if WEB_ENGINE_AVAILABLE and QWebEngineView is not None:
-            self.map_view = QWebEngineView()
-        else:
-            self.map_view = QTextBrowser()
-            self.map_view.setOpenExternalLinks(True)
-            self.map_view.setHtml(
-                "<h3>GPS Map requires Qt WebEngine</h3>"
-                "<p>The map will open in your default browser after rendering.</p>"
-            )
-        map_layout.addWidget(self.map_view, 1)
+        self._map_layout = QHBoxLayout(map_widget)
+        self._map_layout.setContentsMargins(8, 8, 8, 8)
+        # QWebEngineView spins up Qt's whole embedded-Chromium subsystem
+        # (separate GPU/network helper processes, disk cache setup) - by far
+        # the single most expensive thing App startup does, and it's only
+        # ever needed by this one tab. Building it eagerly here made every
+        # launch pay that cost even for users who never open File Checker.
+        # A cheap placeholder goes in its place; _ensure_map_view() swaps in
+        # the real widget lazily, the first time it's actually needed.
+        self.map_view = None
+        self._map_placeholder = QLabel('Map loads when you open this tab…')
+        self._map_placeholder.setAlignment(Qt.AlignCenter)
+        self._map_placeholder.setProperty('class', 'muted')
+        self._map_layout.addWidget(self._map_placeholder, 1)
         self.media_viewer = MediaViewer()
         self.media_viewer.setMinimumWidth(180)
         self.media_viewer.setMaximumWidth(320)
         self.media_viewer.setVisible(False)
-        map_layout.addWidget(self.media_viewer)
+        self._map_layout.addWidget(self.media_viewer)
         map_widget.setMinimumWidth(240)
         self.results_panels.addWidget(map_widget)
 
@@ -3176,8 +3734,24 @@ class DownloaderGUI(QMainWindow):
         self.tabs.addTab(about_tab, 'About')
 
         tab_bar = self.tabs.tabBar()
-        tab_bar.setExpanding(True)
-        tab_bar.setUsesScrollButtons(False)
+        # Not setExpanding(True): that forces every tab to the *same* width,
+        # which can starve the longest label ("Save memories") of the room
+        # its own text needs and clip letters off. Each tab's own sizeHint
+        # (which always accounts for its actual text + padding) is used
+        # instead, so no tab can ever be narrower than what it needs to
+        # render in full.
+        #
+        # setElideMode(ElideNone) is the actual guarantee against clipped
+        # text: without it, Qt will still shrink/elide tabs below their
+        # natural sizeHint whenever the bar doesn't have room for all of
+        # them at full size and can't scroll - which is exactly what was
+        # still happening ("Save memories" rendering as "iave memorie:") even
+        # after removing setExpanding. Scroll buttons are re-enabled as the
+        # fallback for that "not enough room" case instead: a couple of
+        # small arrows beat silently truncated tab labels.
+        tab_bar.setElideMode(Qt.ElideNone)
+        tab_bar.setUsesScrollButtons(True)
+        self.tabs.currentChanged.connect(self._on_main_tab_changed)
 
         try:
             QSettings('SnapchatMemories', 'Downloader').remove('recent_folders')
@@ -3245,8 +3819,10 @@ class DownloaderGUI(QMainWindow):
 
         self.update_export_ui_mode()
 
-        # Defer map HTML load so the main window appears immediately.
-        QTimer.singleShot(200, self.init_default_map)
+        # The default Copenhagen map is built lazily in _ensure_map_view(),
+        # not here - it needs a real map_view to render into, and that
+        # widget itself is now only created once the user opens File
+        # Checker (see the comment on self.map_view = None in init_ui).
     
     def init_default_map(self):
         """Initialize map with a default view"""
@@ -3392,7 +3968,12 @@ class DownloaderGUI(QMainWindow):
         return not any(ch in name for ch in '<>:"/\\|?*')
 
     def _rebuild_process_controls_grid(self) -> None:
-        """Simple layout: export full-width; technical view adds Performance column."""
+        """Stack sections in a single column so none of them ever has to share
+        row width with a sibling - a 2-column layout here forced Run and After
+        processing side by side, and their combined natural width couldn't
+        shrink below ~1600px, wedging the whole tab wide no matter the window
+        size. Stacking vertically works at any window width since the tab is
+        already scrollable."""
         grid = self._process_controls_grid
         for section in (
             self._setup_section,
@@ -3405,17 +3986,40 @@ class DownloaderGUI(QMainWindow):
 
         technical = self._technical_view_enabled()
         self._perf_section.setVisible(technical)
+        row = 0
+        grid.addWidget(self._setup_section, row, 0)
+        row += 1
         if technical:
-            grid.addWidget(self._setup_section, 0, 0)
-            grid.addWidget(self._perf_section, 0, 1)
-            grid.addWidget(self._run_section, 1, 0)
-            grid.addWidget(self._after_section, 1, 1)
-        else:
-            grid.addWidget(self._setup_section, 0, 0, 1, 2)
-            grid.addWidget(self._run_section, 1, 0)
-            grid.addWidget(self._after_section, 1, 1)
-        for col in range(2):
-            grid.setColumnStretch(col, 1)
+            grid.addWidget(self._perf_section, row, 0)
+            row += 1
+        grid.addWidget(self._run_section, row, 0)
+        row += 1
+        grid.addWidget(self._after_section, row, 0)
+        grid.setColumnStretch(0, 1)
+
+    def _set_run_lockout(self, active: bool) -> None:
+        """Dim and disable Setup/Performance/After-processing while a run is
+        active. Deliberately excludes the Run section (the Start/Cancel
+        button lives there and must stay clickable) and the Progress section
+        (the live dashboard must stay scrollable) - a previous full-window
+        overlay covered those too and made it impossible to scroll the log
+        or click Cancel while a run was in progress."""
+        for section in (
+            getattr(self, '_setup_section', None),
+            getattr(self, '_perf_section', None),
+            getattr(self, '_after_section', None),
+        ):
+            if section is None:
+                continue
+            section.setEnabled(not active)
+            if active:
+                effect = section.graphicsEffect()
+                if not isinstance(effect, QGraphicsOpacityEffect):
+                    effect = QGraphicsOpacityEffect(section)
+                    section.setGraphicsEffect(effect)
+                effect.setOpacity(0.4)
+            else:
+                section.setGraphicsEffect(None)
 
     def _update_run_readiness(self) -> None:
         """Enable Start only when export is valid and account name is usable."""
@@ -3780,12 +4384,18 @@ class DownloaderGUI(QMainWindow):
     def _on_account_name_edited(self, _text: str) -> None:
         """Update labels while typing without creating account folders on disk."""
         name = self._account_name()
-        if name:
-            self.update_download_path_label(name, create=False)
+        if not name:
+            return
+        self.update_download_path_label(name, create=False, storage_scan=False)
+        if self._technical_view_enabled():
+            self._pending_storage_account = name
+            self._storage_debounce_timer.start(400)
 
-    def update_download_path_label(self, account_name: str, *, create: bool = False) -> None:
+    def update_download_path_label(
+        self, account_name: str, *, create: bool = False, storage_scan: bool = True
+    ) -> None:
         try:
-            from smd.account_layout import format_bytes, technical_storage_summary
+            from smd.account_layout import format_bytes
 
             paths = self._account_paths(account_name, create=create)
             if self._technical_view_enabled():
@@ -3798,25 +4408,62 @@ class DownloaderGUI(QMainWindow):
                 )
                 return
             if self._technical_view_enabled():
-                rows = technical_storage_summary(paths)
-                staging_bytes = next((n for label, n in rows if label == 'staging'), 0)
-                total_tech = sum(n for _, n in rows)
-                parts = [f"staging {format_bytes(staging_bytes)}"]
-                parts.extend(
-                    f"{label} {format_bytes(size)}"
-                    for label, size in rows
-                    if label != 'staging' and size > 0
-                )
-                self.technical_storage_label.setText(
-                    f"Technical: {paths.technical_dir} - {', '.join(parts)} "
-                    f"(total {format_bytes(total_tech)})"
-                )
+                if storage_scan:
+                    self.technical_storage_label.setText('Technical: Calculating…')
+                    self._pending_storage_account = account_name
+                    self._run_technical_storage_scan()
             else:
                 self.technical_storage_label.setText('')
         except Exception:
             self.download_path_label.setText('Folder: (unavailable)')
             self.technical_storage_label.setText('')
         self._refresh_after_processing_actions()
+
+    def _run_technical_storage_scan(self) -> None:
+        account_name = self._pending_storage_account or self._account_name()
+        if not account_name or not self._technical_view_enabled():
+            return
+        try:
+            paths = self._account_paths(account_name, create=False)
+        except Exception:
+            return
+        self._storage_scan_generation += 1
+        generation = self._storage_scan_generation
+        self._stop_worker('technical_storage_worker')
+        self.technical_storage_worker = TechnicalStorageWorker(paths, account_name)
+        self.technical_storage_worker.finished_ok.connect(
+            lambda name, rows, gen=generation: self._on_technical_storage_ready(name, rows, gen)
+        )
+        self.technical_storage_worker.error.connect(self._on_technical_storage_error)
+        self.technical_storage_worker.start()
+
+    def _on_technical_storage_ready(self, account_name: str, rows, generation: int) -> None:
+        if generation != self._storage_scan_generation:
+            return
+        if self._account_name() != account_name or not self._technical_view_enabled():
+            return
+        try:
+            from smd.account_layout import format_bytes
+
+            paths = self._account_paths(account_name, create=False)
+            staging_bytes = next((n for label, n in rows if label == 'staging'), 0)
+            total_tech = sum(n for _, n in rows)
+            parts = [f"staging {format_bytes(staging_bytes)}"]
+            parts.extend(
+                f"{label} {format_bytes(size)}"
+                for label, size in rows
+                if label != 'staging' and size > 0
+            )
+            self.technical_storage_label.setText(
+                f"Technical: {paths.technical_dir} - {', '.join(parts)} "
+                f"(total {format_bytes(total_tech)})"
+            )
+        except Exception:
+            self.technical_storage_label.setText('Technical: (unavailable)')
+
+    def _on_technical_storage_error(self, _message: str) -> None:
+        if self._technical_view_enabled():
+            self.technical_storage_label.setText('Technical: (size scan failed)')
 
     @staticmethod
     def _folder_has_files(folder: Path, *, min_files: int = 1) -> bool:
@@ -3837,6 +4484,7 @@ class DownloaderGUI(QMainWindow):
         """Enable After processing buttons only when the relevant project data exists."""
         buttons = (
             self.open_folder_btn,
+            self.open_gallery_btn,
             self.open_technical_btn,
             self.verify_staging_btn,
             self.review_duplicates_btn,
@@ -3870,6 +4518,7 @@ class DownloaderGUI(QMainWindow):
         has_debug = self._folder_has_files(paths.debug_dir)
 
         self.open_folder_btn.setEnabled(has_merged)
+        self.open_gallery_btn.setEnabled(has_merged)
         self.open_technical_btn.setEnabled(has_technical)
         self.verify_staging_btn.setEnabled(has_staging)
         self.review_duplicates_btn.setEnabled(has_merged)
@@ -3886,6 +4535,47 @@ class DownloaderGUI(QMainWindow):
         except Exception as e:
             try:
                 QMessageBox.warning(self, 'Folder Error', f'Could not open folder:\n{e}')
+            except Exception:
+                pass
+
+    def open_gallery_view(self):
+        """Exploit the Windows Photos app as a zero-maintenance gallery: opening
+        one memory launches the OS default viewer, which lets the user arrow
+        through every photo/video in the same folder, zoom, and run a slideshow -
+        no custom gallery UI for SMD to build or maintain."""
+        try:
+            account_name = self._account_name()
+            if not account_name:
+                QMessageBox.information(self, 'Gallery', 'Enter an account name first.')
+                return
+            paths = self._account_paths(account_name)
+            merged_dir = paths.merged_dir
+            if not merged_dir.is_dir():
+                QMessageBox.information(
+                    self, 'Gallery', 'No finished memories yet - run processing first.'
+                )
+                return
+            from smd.media_types import MEDIA_EXTENSIONS
+
+            gallery_exts = MEDIA_EXTENSIONS | {'.webp'}
+            first_file = min(
+                (
+                    p
+                    for p in merged_dir.iterdir()
+                    if p.is_file() and p.suffix.lower() in gallery_exts
+                ),
+                key=lambda p: p.name.lower(),
+                default=None,
+            )
+            if first_file is None:
+                QMessageBox.information(
+                    self, 'Gallery', 'No photos or videos found in the finished folder.'
+                )
+                return
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(first_file)))
+        except Exception as e:
+            try:
+                QMessageBox.warning(self, 'Gallery Error', f'Could not open gallery view:\n{e}')
             except Exception:
                 pass
 
@@ -4073,7 +4763,7 @@ class DownloaderGUI(QMainWindow):
         self.live_run_dashboard.setVisible(True)
         if reset:
             self.live_run_dashboard.reset(planned_estimate=self._last_estimate_label)
-            for line in self._run_log_buffer[-80:]:
+            for line in self._run_log_buffer:
                 self.live_run_dashboard.log.appendPlainText(line)
 
     def _refresh_run_dashboard(
@@ -4137,18 +4827,21 @@ class DownloaderGUI(QMainWindow):
             self.live_run_dashboard.log.appendPlainText(
                 f"[{datetime.now().strftime('%H:%M:%S')}] Live dashboard opened."
             )
-            for line in self._run_log_buffer[-80:]:
+            for line in self._run_log_buffer:
                 self.live_run_dashboard.log.appendPlainText(line)
 
     def append_debug_message(self, message: str):
-        """Append a message to the live dashboard log and update step hints."""
+        """Append a message to the live dashboard log and update step hints.
+
+        Kept in full (no in-memory cap) and also mirrored to a per-run log
+        file on disk, so a run that lasts hours can still be scrolled back
+        to the very start, and remains reviewable even after SMD closes."""
         if not hasattr(self, "live_run_dashboard"):
             return
         timestamp = datetime.now().strftime("%H:%M:%S")
         line = f"[{timestamp}] {message}"
         self._run_log_buffer.append(line)
-        if len(self._run_log_buffer) > 400:
-            self._run_log_buffer.pop(0)
+        self._write_run_log_line(line)
 
         phase = self._phase_from_log_message(message)
         if phase:
@@ -4162,6 +4855,17 @@ class DownloaderGUI(QMainWindow):
         short = message.strip()
         if short and not short.startswith("⏳"):
             self._refresh_run_dashboard(status=short[:240], phase=phase, status_kind="info")
+
+    def _write_run_log_line(self, line: str) -> None:
+        """Append one line to this run's on-disk activity log, if open."""
+        path = getattr(self, '_run_log_path', None)
+        if not path:
+            return
+        try:
+            with open(path, 'a', encoding='utf-8') as f:
+                f.write(line + '\n')
+        except OSError:
+            self._run_log_path = None
 
     def restore_account_name_field(self):
         """Restore last project name as plain text (no scrollable dropdown)."""
@@ -4407,6 +5111,7 @@ class DownloaderGUI(QMainWindow):
         """Handle map rendering completion"""
         print("DEBUG: on_map_render_finished called")
         try:
+            self._ensure_map_view()
             print(f"DEBUG: Map file path: {html_file_path}")
             self._track_map_html_temp(html_file_path)
             self.stop_status_animation()
@@ -4795,14 +5500,22 @@ class DownloaderGUI(QMainWindow):
             self._run_phase = "Starting"
             self.dl_start_time = None
             self.dl_total_files = 0
+            try:
+                paths.logs_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+                self._run_log_path = paths.logs_dir / f'run_activity_{ts}.log'
+            except OSError:
+                self._run_log_path = None
             self._show_run_dashboard(reset=True)
+            self.append_debug_message(
+                f"Performance mode: {self.perf_mode_combo.currentText()}"
+            )
             self.download_cancelled = False
             self.download_running = True
             self._refresh_after_processing_actions()
             self.download_btn.setText('Cancel')
             self.download_btn.setToolTip('Stop the current operation.')
-            if hasattr(self, 'processing_shield'):
-                self.processing_shield.show_over()
+            self._set_run_lockout(True)
 
             merge_overlays = True
             keep_raw = self.save_raw_chk.isChecked()
@@ -4841,8 +5554,7 @@ class DownloaderGUI(QMainWindow):
             self.download_running = False
             self.download_btn.setText('Start full processing')
             self._refresh_after_processing_actions()
-            if hasattr(self, 'processing_shield'):
-                self.processing_shield.hide()
+            self._set_run_lockout(False)
             QMessageBox.critical(self, 'Error', str(e))
 
     def on_local_progress(self, current, total):
@@ -4905,6 +5617,7 @@ class DownloaderGUI(QMainWindow):
         self.download_running = False
         self.update_export_ui_mode()
         self._refresh_after_processing_actions()
+        self._set_run_lockout(False)
         self.download_btn.setText('Start full processing')
         self.download_btn.setToolTip("Runs extract, merge, metadata, and reports in one flow")
         bundled = getattr(self, 'export_analysis', None) and getattr(self.export_analysis, 'is_bundled', False)
@@ -4924,8 +5637,6 @@ class DownloaderGUI(QMainWindow):
                 pass
             self._show_completion_summary()
         else:
-            if hasattr(self, 'processing_shield'):
-                self.processing_shield.hide()
             if getattr(self, 'download_cancelled', False):
                 self._apply_status(self.status_label, '⏹ Stopped. Click Start to resume with the same account name.', "warn")
             else:
@@ -5050,6 +5761,8 @@ class DownloaderGUI(QMainWindow):
         self._sync_doc_readers_theme()
         if hasattr(self, 'results_panels'):
             self.results_panels.set_dark_theme(self.dark_mode_enabled)
+        if hasattr(self, 'technical_view_chk'):
+            self._apply_technical_view_ui()
 
     def apply_theme_mode(self, mode: str):
         from smd.theme import THEME_DARK, resolve_theme
@@ -5103,63 +5816,106 @@ class DownloaderGUI(QMainWindow):
         # picks up the current theme the next time it is loaded.
 
     def _show_completion_summary(self) -> None:
-        """Build and show the post-run summary. Always gives feedback and always
-        hides the processing shield, even if any single step fails."""
+        """Kick off the post-run summary. The staging integrity check that
+        this depends on ffprobes every video, which can take minutes on a
+        large library - it now runs on a background thread (see
+        StagingVerifyWorker) so the window stays responsive instead of
+        looking frozen right after processing finishes."""
         account_name = self._account_name()
-        report = None
-        paths = None
         try:
             paths = self._account_paths(account_name)
-            keep_raw = self.save_raw_chk.isChecked()
-            stats = getattr(getattr(self, 'local_export_worker', None), 'run_stats', None)
-
-            from smd.account_layout import format_bytes
-            from smd.session_report import build_session_report, save_session_report
-            from smd.staging_check import check_staging_readiness, delete_staging_folder
-
-            readiness = check_staging_readiness(
-                paths.account_dir, layout=paths, require_raw=keep_raw
-            )
-            staging_deleted = False
-            staging_freed = ""
-            if readiness.safe_to_delete:
-                ok, _msg = delete_staging_folder(
-                    paths.account_dir, report=readiness, layout=paths
-                )
-                if ok:
-                    staging_deleted = True
-                    staging_freed = format_bytes(readiness.staging_bytes)
-
-            report = build_session_report(
-                paths.account_dir,
-                stats=stats,
-                success=True,
-                require_raw=keep_raw,
-                staging_deleted=staging_deleted,
-                staging_freed=staging_freed,
-                layout=paths,
-            )
-            save_session_report(paths, report)
         except Exception as exc:
-            self._log_completion_error("build session summary", exc, paths)
-            report = None
+            self._log_completion_error("resolve account paths", exc, None)
+            if hasattr(self, 'processing_shield'):
+                self.processing_shield.hide()
+            self._show_minimal_completion_message(account_name, None)
+            return
+
+        self._completion_account_name = account_name
+        self._completion_paths = paths
+        self._completion_stats = getattr(
+            getattr(self, 'local_export_worker', None), 'run_stats', None
+        )
+        self._completion_keep_raw = self.save_raw_chk.isChecked()
+
+        if getattr(self, 'keep_staging_chk', None) and self.keep_staging_chk.isChecked():
+            # "Keep staging media files" means nothing will be deleted, so
+            # there is no point paying for the expensive ffprobe-every-video
+            # integrity check either - skip straight to the summary.
+            self._finish_completion_summary(None, skipped_by_setting=True)
+            return
 
         if hasattr(self, 'processing_shield'):
-            self.processing_shield.hide()
+            self.processing_shield.hint_label.setText(
+                'Double-checking every saved file before showing the summary. '
+                'Large libraries with many videos can take a few minutes - '
+                'your files are already saved; this step only verifies them.'
+            )
+            self.processing_shield.show_over()
 
+        self._staging_verify_worker = StagingVerifyWorker(
+            paths.account_dir, paths, self._completion_keep_raw
+        )
+        self._staging_verify_worker.finished_ok.connect(self._on_staging_verified)
+        self._staging_verify_worker.error.connect(self._on_staging_verify_error)
+        self._staging_verify_worker.start()
+
+    def _on_staging_verify_error(self, message: str) -> None:
+        self._log_completion_error(
+            "verify staging", RuntimeError(message), self._completion_paths
+        )
+        self._finish_completion_summary(None)
+
+    def _on_staging_verified(self, readiness) -> None:
+        self._finish_completion_summary(readiness)
+
+    def _finish_completion_summary(self, readiness, skipped_by_setting: bool = False) -> None:
+        """Kick off background finalize (staging delete + session report)."""
+        paths = self._completion_paths
+        stats = self._completion_stats
+        keep_raw = self._completion_keep_raw
+
+        if hasattr(self, 'processing_shield'):
+            self.processing_shield.hint_label.setText(
+                'Preparing your summary. Large libraries can take a minute - '
+                'your files are already saved.'
+            )
+            self.processing_shield.show_over()
+
+        self._stop_worker('completion_finalize_worker')
+        self.completion_finalize_worker = CompletionFinalizeWorker(
+            paths, stats, keep_raw, readiness, skipped_by_setting
+        )
+        self.completion_finalize_worker.finished_ok.connect(self._on_completion_finalize_finished)
+        self.completion_finalize_worker.error.connect(self._on_completion_finalize_error)
+        self.completion_finalize_worker.start()
+
+    def _on_completion_finalize_finished(self, report) -> None:
+        account_name = self._completion_account_name
+        paths = self._completion_paths
+        if hasattr(self, 'processing_shield'):
+            self.processing_shield.hide()
         try:
-            if report is not None:
-                dlg = SessionSummaryDialog(report, paths.library_root, paths.reports_dir, self)
-                dlg.exec_()
-            else:
-                self._show_minimal_completion_message(account_name, paths)
+            dlg = SessionSummaryDialog(report, paths.library_root, paths.reports_dir, self)
+            dlg.exec_()
         except Exception as exc:
             self._log_completion_error("show session summary", exc, paths)
             self._show_minimal_completion_message(account_name, paths)
-
         QTimer.singleShot(
             0,
             lambda an=account_name, p=paths, r=report: self._after_processing_summary(an, p, r),
+        )
+
+    def _on_completion_finalize_error(self, message: str) -> None:
+        account_name = self._completion_account_name
+        paths = self._completion_paths
+        self._log_completion_error("build session summary", RuntimeError(message), paths)
+        if hasattr(self, 'processing_shield'):
+            self.processing_shield.hide()
+        self._show_minimal_completion_message(account_name, paths)
+        QTimer.singleShot(
+            0,
+            lambda an=account_name, p=paths, r=None: self._after_processing_summary(an, p, r),
         )
 
     def _show_minimal_completion_message(self, account_name: str, paths) -> None:
@@ -5219,14 +5975,21 @@ class DownloaderGUI(QMainWindow):
         if duplicate_groups <= 0:
             return
         try:
-            from smd.duplicates import load_cached_duplicate_report, scan_content_duplicates
+            from smd.duplicates import load_cached_duplicate_report
 
             report = load_cached_duplicate_report(paths)
-            if not report or not report.duplicate_groups:
-                report = scan_content_duplicates(paths, move_to_folder=False)
-            if not report.duplicate_groups:
+            if report and report.duplicate_groups:
+                self._show_duplicate_review_dialog(account_name, paths, report)
                 return
-            self._show_duplicate_review_dialog(account_name, paths, report)
+
+            self._duplicate_scan_account_name = account_name
+            self._duplicate_scan_paths = paths
+            self._duplicate_scan_auto_open = True
+            self._stop_worker('duplicate_scan_worker')
+            self.duplicate_scan_worker = DuplicateScanWorker(paths)
+            self.duplicate_scan_worker.finished.connect(self.on_duplicate_scan_finished)
+            self.duplicate_scan_worker.error.connect(self._on_post_run_duplicate_scan_error)
+            self.duplicate_scan_worker.start()
         except Exception as exc:
             print(f"Duplicate review error: {exc}")
             QMessageBox.warning(
@@ -5236,32 +5999,83 @@ class DownloaderGUI(QMainWindow):
                 'Your finished photos and videos are already saved — this step is optional.',
             )
 
+    def _on_post_run_duplicate_scan_error(self, message: str) -> None:
+        self._duplicate_scan_auto_open = False
+        print(f"Duplicate review error: {message}")
+
     def review_duplicates(self):
+        if self.download_running:
+            QMessageBox.information(
+                self,
+                'Review duplicates',
+                'Wait until the current download/processing job finishes.',
+            )
+            return
         account_name = self._account_name()
         if not account_name:
             QMessageBox.information(self, 'Duplicates', 'Enter an account name first.')
             return
         paths = self._account_paths(account_name)
-        try:
-            from smd.duplicates import scan_content_duplicates
 
-            report = scan_content_duplicates(paths, move_to_folder=False)
-            if not report.duplicate_groups:
+        # Processing already hashed merged/ once and saved the result to
+        # technical/reports/duplicates_report.json. Trust that cache instead
+        # of re-hashing everything on every click - it's kept in sync
+        # whenever duplicates are deleted, and a full re-process (which
+        # everyone runs after fixing a real bug) always regenerates it fresh.
+        from smd.duplicates import load_cached_duplicate_report
+
+        self._duplicate_scan_account_name = account_name
+        self._duplicate_scan_paths = paths
+
+        cached = load_cached_duplicate_report(paths)
+        if cached is not None:
+            self.on_duplicate_scan_finished(cached)
+            return
+
+        self.review_duplicates_btn.setEnabled(False)
+        self._apply_status(self.status_label, 'Checking for duplicate files…', 'info')
+        # No cache yet (first check on this account) - hashing every file in
+        # merged/ can take a while on large libraries, so run it off the UI
+        # thread rather than blocking the window.
+        self._stop_worker('duplicate_scan_worker')
+        self.duplicate_scan_worker = DuplicateScanWorker(paths)
+        self.duplicate_scan_worker.progress.connect(self.on_duplicate_scan_progress)
+        self.duplicate_scan_worker.finished.connect(self.on_duplicate_scan_finished)
+        self.duplicate_scan_worker.error.connect(self.on_duplicate_scan_error)
+        self.duplicate_scan_worker.start()
+
+    def on_duplicate_scan_progress(self, message: str) -> None:
+        self._apply_status(self.status_label, message, 'info')
+
+    def on_duplicate_scan_finished(self, report) -> None:
+        auto_open = getattr(self, '_duplicate_scan_auto_open', False)
+        self._duplicate_scan_auto_open = False
+        self._refresh_after_processing_actions()
+        account_name = getattr(self, '_duplicate_scan_account_name', None)
+        paths = getattr(self, '_duplicate_scan_paths', None)
+        if not report.duplicate_groups:
+            if not auto_open:
+                self._apply_status(self.status_label, 'No duplicates found.', 'ok')
                 QMessageBox.information(
                     self,
                     'Duplicates',
                     f'Scanned {report.merged_scanned} files - no byte-identical duplicates found.',
                 )
-                return
+            return
+        self._apply_status(self.status_label, 'Duplicates found - opening review.', 'info')
+        if account_name and paths is not None:
             self._show_duplicate_review_dialog(account_name, paths, report)
-        except Exception as exc:
-            print(f"Duplicate review error: {exc}")
-            QMessageBox.warning(
-                self,
-                'Review duplicates',
-                'Could not open duplicate review.\n\n'
-                'Your finished files are not affected — this step is optional.',
-            )
+
+    def on_duplicate_scan_error(self, message: str) -> None:
+        self._refresh_after_processing_actions()
+        self._apply_status(self.status_label, 'Duplicate check failed.', 'err')
+        print(f"Duplicate review error: {message}")
+        QMessageBox.warning(
+            self,
+            'Review duplicates',
+            'Could not open duplicate review.\n\n'
+            'Your finished files are not affected — this step is optional.',
+        )
 
     def show_export_example(self):
         """Show the export settings example image in fullscreen popup"""
@@ -5385,60 +6199,70 @@ class SingleInstance:
         except OSError:
             pass
 
-    def is_already_running(self):
-        """Check if another instance is already running"""
-        # First, try file-based locking (more reliable on Windows)
+    def _read_lock_pid(self) -> int | None:
         try:
-            # Check if lock file exists and process is still running
-            if self.lock_path.exists():
-                try:
-                    pid_str = self.lock_path.read_text().strip()
-                    if pid_str.isdigit():
-                        pid = int(pid_str)
-                        # Check if process is still running
-                        if psutil.pid_exists(pid):
-                            try:
-                                proc = psutil.Process(pid)
-                                proc_name = proc.name().lower()
-                                print(f"DEBUG: Found process {pid} with name: {proc_name}")
-                                # Check if it's Python and running this script
-                                if 'python' in proc_name:
-                                    try:
-                                        cmdline = proc.cmdline()
-                                        print(f"DEBUG: Process command line: {cmdline}")
-                                        if _cmdline_runs_smd_gui(cmdline):
-                                            print(f"DEBUG: Confirmed running instance with PID {pid}")
-                                            return True
-                                    except (psutil.AccessDenied, psutil.NoSuchProcess):
-                                        # If we can't get cmdline, assume it's our process
-                                        print(f"DEBUG: Found running Python instance with PID {pid}")
-                                        return True
-                            except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
-                                print(f"DEBUG: Process {pid} no longer accessible: {e}")
-                                pass
-                except Exception as e:
-                    print(f"DEBUG: Error checking lock file: {e}")
-                
-                # Lock file is stale, remove it
-                print(f"DEBUG: Removing stale lock file")
+            pid_str = self.lock_path.read_text().strip()
+            return int(pid_str) if pid_str.isdigit() else None
+        except (OSError, ValueError):
+            return None
+
+    def _lock_owner_is_alive(self, pid: int) -> bool:
+        if not psutil.pid_exists(pid):
+            return False
+        try:
+            proc = psutil.Process(pid)
+            proc_name = proc.name().lower()
+            print(f"DEBUG: Found process {pid} with name: {proc_name}")
+            if 'python' not in proc_name:
+                return False
+            cmdline = proc.cmdline()
+            print(f"DEBUG: Process command line: {cmdline}")
+            return _cmdline_runs_smd_gui(cmdline)
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            # Can't confirm cmdline, but the PID is alive - assume it's ours
+            # rather than risk two full instances running at once.
+            return True
+
+    def is_already_running(self):
+        """Claim the single-instance lock, or detect that another instance
+        already holds it.
+
+        Uses an atomic exclusive-create ('x' mode) instead of a separate
+        exists()-check-then-write() - the old two-step version had a real
+        TOCTOU race: two processes launched close together (e.g. a
+        double-click registering twice) could each see "no lock file yet"
+        and both proceed to build a full window, doubling startup cost and
+        leaving two independent windows fighting over the same account
+        data. 'x' mode makes the OS itself the single arbiter of who wins.
+        """
+        # Up to 2 attempts: first with whatever's on disk, second after
+        # clearing a confirmed-stale lock left by a dead process.
+        for attempt in range(2):
+            try:
+                fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                owner_pid = self._read_lock_pid()
+                if owner_pid is not None and self._lock_owner_is_alive(owner_pid):
+                    print(f"DEBUG: Confirmed running instance with PID {owner_pid}")
+                    return True
+                print("DEBUG: Removing stale lock file")
                 try:
                     self.lock_path.unlink()
-                except Exception:
+                except OSError:
                     pass
-            
-            # Create new lock file
-            self.lock_file = open(self.lock_path, 'w')
-            self.lock_file.write(str(os.getpid()))
-            self.lock_file.flush()
-            print(f"DEBUG: Created lock file with PID {os.getpid()}")
-            
-            # Register cleanup on exit
-            atexit.register(self.cleanup)
-            return False
-            
-        except Exception as e:
-            print(f"DEBUG: Error in is_already_running: {e}")
-            return False
+                continue
+            except OSError as e:
+                print(f"DEBUG: Error in is_already_running: {e}")
+                return False
+            else:
+                with os.fdopen(fd, 'w') as f:
+                    f.write(str(os.getpid()))
+                print(f"DEBUG: Created lock file with PID {os.getpid()}")
+                atexit.register(self.cleanup)
+                return False
+        # Lost the race twice in a row (very unlikely) - fail safe by
+        # deferring rather than risking a duplicate window.
+        return True
     
     def cleanup(self):
         """Clean up resources"""

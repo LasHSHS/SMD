@@ -13,8 +13,6 @@ from smd.procutil import subprocess_flags as _subprocess_flags
 
 # Maximum practical quality for export outputs
 JPEG_QUALITY = 100
-# x264 CRF 0 = lossless (large files); use 1 for near-lossless if size explodes
-VIDEO_CRF = 0
 
 
 def merge_image_overlay(main_path: Path, overlay_path: Path, output_path: Path) -> bool:
@@ -51,8 +49,14 @@ def merge_video_overlay(
     output_path: Path,
     *,
     threads: int | None = None,
+    metadata_flags: list[str] | None = None,
 ) -> bool:
-    """Burn PNG overlay onto video using ffmpeg overlay filter."""
+    """Burn PNG overlay onto video using ffmpeg overlay filter.
+
+    ``metadata_flags`` (from ``smd.metadata.video_metadata_ffmpeg_flags``) are
+    folded into this same encode pass when given, so the caller doesn't need
+    a second, separate ffmpeg remux afterward just to embed the capture date.
+    """
     from smd.gpu_encode import detect_video_encode_profiles
 
     import os
@@ -71,7 +75,7 @@ def merge_video_overlay(
             "-nostdin",
             "-y",
         ]
-        if threads and threads > 0 and profile.id == "cpu_lossless":
+        if threads and threads > 0 and profile.id == "cpu_high_quality":
             cmd.extend(["-threads", str(threads)])
         cmd.extend(
             [
@@ -84,6 +88,7 @@ def merge_video_overlay(
                 *profile.args,
                 "-c:a",
                 "copy",
+                *(metadata_flags or []),
                 str(tmp),
             ]
         )

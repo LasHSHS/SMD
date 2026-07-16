@@ -260,7 +260,7 @@ def _compute_ffmpeg_limits(
     """
     Return (max_ffmpeg, threads_per_job).
 
-    More RAM allows more concurrent lossless encodes; thread cap per job
+    More RAM allows more concurrent high-quality encodes; thread cap per job
     keeps total ffmpeg CPU use below logical_cpus with OS/Python headroom.
     """
     if ram_gb < 8:

@@ -25,7 +25,6 @@ Same philosophy as commercial tools (SnapEasy, etc.), but open source (GPLv3 pla
 | PyQt5 + **Qt WebEngine** | GUI + in-app GPS map |
 | **ffmpeg + ffprobe** (`tools/ffmpeg/`) | Video overlay merge, repair, GPS read |
 | Pillow, mutagen, exif | Date + GPS metadata embed |
-| timezonefinder + data | Local time from GPS |
 | folium + assets | Map HTML generation |
 
 **Do not** tell users to install ffmpeg, choco packages, or Python.  

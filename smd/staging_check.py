@@ -15,7 +15,7 @@ from smd.local_pipeline import (
     _load_items_from_staging,
     _resolve_output_filename,
     build_allowed_output_filenames,
-    build_deterministic_match_map,
+    build_match_map,
     build_unique_output_names,
 )
 from smd.media_integrity import validate_image_file, validate_video_file
@@ -79,6 +79,7 @@ class StagingReadinessReport:
     orphan_merged: int = 0
     orphan_raw: int = 0
     duplicate_merged_names: int = 0
+    duplicate_removed_count: int = 0
     quarantine_count: int = 0
     issues: list[StagingCheckIssue] = field(default_factory=list)
 
@@ -94,6 +95,10 @@ class StagingReadinessReport:
             )
         if self.pending_checkpoint:
             lines.append(f"Not finished yet: {len(self.pending_checkpoint)}")
+        if self.duplicate_removed_count:
+            lines.append(
+                f"Removed via duplicate review (expected gone): {self.duplicate_removed_count}"
+            )
         if self.missing_merged:
             lines.append(f"Missing in merged/: {len(self.missing_merged)}")
         if self.missing_raw:
@@ -125,6 +130,27 @@ def _count_media_files(folder: Path) -> int:
     if not folder.is_dir():
         return 0
     return sum(1 for p in folder.iterdir() if p.is_file())
+
+
+def _load_duplicate_removed_filenames(reports_dir: Path) -> set[str]:
+    """Filenames the user permanently deleted via 'Review duplicates'.
+
+    Those files are gone from merged/ and raw/ on purpose - without this,
+    check_staging_readiness would keep flagging them as "missing" forever,
+    and technical/staging/ (often tens of GB) could never be auto-deleted
+    again for any account where duplicates were ever cleaned up."""
+    removed: set[str] = set()
+    if not reports_dir.is_dir():
+        return removed
+    for report_path in reports_dir.glob("duplicates_deleted_report_*.json"):
+        try:
+            data = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for selection in (data.get("group_selections") or {}).values():
+            for name in selection.get("deleted") or []:
+                removed.add(name)
+    return removed
 
 
 def _count_quarantine(folder: Path) -> int:
@@ -203,7 +229,14 @@ def check_staging_readiness(
     if paths.json_path.is_file():
         try:
             memories = load_memories(paths.json_path)
-            match_map = build_deterministic_match_map(items, memories)
+            # Must match the same function local_pipeline.py uses when it
+            # actually writes merged/raw output (UID-first, positional
+            # fallback only for unmatched items) - using the pure positional
+            # fallback here on its own can pick a different memory for items
+            # that share a date+type bucket, producing a "planned" filename
+            # that never matches what was really written and creating false
+            # missing/orphan reports for otherwise perfectly good files.
+            match_map = build_match_map(items, memories)
             output_names, _ = build_unique_output_names(items, match_map)
         except Exception as exc:
             issues.append(
@@ -244,10 +277,13 @@ def check_staging_readiness(
             )
         )
 
+    removed_by_dup_review = _load_duplicate_removed_filenames(paths.reports_dir)
+
     missing_merged: list[str] = []
     missing_raw: list[str] = []
     undersized_merged: list[str] = []
     undersized_raw: list[str] = []
+    duplicate_removed = 0
     for stem in main_stems:
         item = items[stem]
         planned = output_names.get(stem)
@@ -255,20 +291,30 @@ def check_staging_readiness(
             ext = item.main_ext or (item.main_path.suffix.lower() if item.main_path else ".mp4")
             planned = f"{item.date_prefix}_{item.uid[:8]}{ext}"
 
+        ext = item.main_ext or (item.main_path.suffix.lower() if item.main_path else ".mp4")
+        was_removed_as_duplicate = planned in removed_by_dup_review or (
+            _resolve_output_filename(planned, ext) in removed_by_dup_review
+        )
+
         merged_status = _stem_output_status(item, planned, paths.merged_dir)
         if merged_status == "ok":
+            report.outputs_verified += 1
+        elif was_removed_as_duplicate:
+            duplicate_removed += 1
             report.outputs_verified += 1
         elif merged_status == "too_small":
             undersized_merged.append(stem)
         else:
             missing_merged.append(stem)
 
-        if require_raw:
+        if require_raw and not was_removed_as_duplicate:
             raw_status = _stem_output_status(item, planned, paths.raw_dir)
             if raw_status == "too_small":
                 undersized_raw.append(stem)
             elif raw_status != "ok":
                 missing_raw.append(stem)
+
+    report.duplicate_removed_count = duplicate_removed
 
     report.missing_merged = missing_merged
     report.missing_raw = missing_raw
@@ -350,14 +396,16 @@ def check_staging_readiness(
                 )
             )
 
-        if report.merged_count != len(set(output_names.values())):
+        expected_merged_count = len(set(output_names.values())) - report.duplicate_removed_count
+        if report.merged_count != expected_merged_count:
             issues.append(
                 StagingCheckIssue(
                     code="merged_count_mismatch",
                     severity="warning",
                     message=(
-                        f"Expected {len(set(output_names.values()))} unique merged files, "
-                        f"found {report.merged_count}."
+                        f"Expected {expected_merged_count} unique merged files "
+                        f"(after {report.duplicate_removed_count} removed via duplicate "
+                        f"review), found {report.merged_count}."
                     ),
                 )
             )

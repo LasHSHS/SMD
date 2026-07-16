@@ -1,17 +1,22 @@
-"""GPS-aware timezone conversion shared by output naming and metadata.
+"""Timezone conversion shared by output naming and metadata.
 
 Output filenames and embedded EXIF timestamps must agree, so both go through
 this single implementation.
+
+Deliberately uses the system's local timezone rather than a GPS-derived
+timezone for the photo/video location. Snapchat's own app displays memory
+timestamps in the phone's configured device timezone, not the timezone of
+wherever the phone physically was at capture time. If a phone doesn't
+auto-update timezone while traveling (common when roaming without a data
+connection, or with automatic timezone updates disabled), GPS-derived local
+time can be off by an hour or more from what the user actually saw in
+Snapchat and remembers. Matching the system timezone keeps SMD's output
+consistent with what users expect from their own Snapchat app. See
+agent-docs/DECISIONS.md for the concrete case that motivated this.
 """
 from __future__ import annotations
 
 from datetime import datetime
-
-import pytz
-from timezonefinder import TimezoneFinder
-
-# One shared instance: TimezoneFinder initialization is expensive.
-_timezone_finder = TimezoneFinder()
 
 
 def to_local_datetime(
@@ -19,15 +24,9 @@ def to_local_datetime(
     latitude: float | None = None,
     longitude: float | None = None,
 ) -> datetime:
-    """Convert a UTC capture time to local time at the GPS location.
+    """Convert a UTC capture time to the local system timezone.
 
-    Falls back to the system timezone when GPS is absent or lookup fails.
+    latitude/longitude are accepted for backward compatibility but are no
+    longer used to derive the timezone; see module docstring for why.
     """
-    if latitude is not None and longitude is not None:
-        try:
-            tz_name = _timezone_finder.timezone_at(lat=latitude, lng=longitude)
-            if tz_name:
-                return date.astimezone(pytz.timezone(tz_name))
-        except Exception:
-            pass
     return date.astimezone()

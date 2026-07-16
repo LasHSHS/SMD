@@ -12,8 +12,6 @@ dependencies = [
     "PyQtWebEngine>=5.15.0",
     "PyQt5>=5.15.0",
     "mutagen>=1.47.0",
-    "pytz",
-    "timezonefinder",
     "packaging",
     "psutil>=5.9.0",
 ]

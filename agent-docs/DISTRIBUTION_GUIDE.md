@@ -10,7 +10,6 @@ SMD is distributed as **one self-contained package**. End users install or unzip
 | PyQt5 + Qt WebEngine | GUI + in-app GPS map |
 | ffmpeg + ffprobe | Video overlays, repair, GPS read |
 | Pillow, mutagen, exif | Metadata embed |
-| timezonefinder + data | Local time from GPS |
 | folium + assets | Map HTML generation |
 
 ## Build (release maintainer only)

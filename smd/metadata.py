@@ -6,8 +6,6 @@ import shutil
 import os
 from pathlib import Path
 from datetime import datetime, timezone
-import pytz
-from timezonefinder import TimezoneFinder
 import exif
 from smd.models import Memory
 from smd.ffmpeg_bundle import resolve_ffprobe, ffprobe_available
@@ -18,7 +16,7 @@ from PIL.ExifTags import TAGS, GPSTAGS
 _FFPROBE_AVAILABLE = ffprobe_available()
 
 def get_local_datetime(memory: Memory) -> datetime:
-    """Convert memory date to local time based on GPS or system timezone."""
+    """Convert memory date (UTC) to this PC's local timezone."""
     from smd.timeutil import to_local_datetime
 
     return to_local_datetime(memory.date, memory.latitude, memory.longitude)
@@ -86,9 +84,28 @@ def _gps_iso6709(memory: Memory) -> str | None:
     return f"{lat_p}{abs(lat):.6f}{lon_p}{abs(lon):.6f}/"
 
 
+def video_metadata_ffmpeg_flags(memory: Memory) -> list[str]:
+    """``-metadata`` flag pairs that embed the capture date + GPS into an
+    MP4/MOV container during an ffmpeg pass.
+
+    Exposed separately (not just inside ``_set_video_container_date``) so a
+    caller that is already running ffmpeg on this file for another reason
+    (e.g. burning in an overlay) can fold these flags into that *same* pass
+    instead of paying for a second, separate remux of the whole file
+    afterward - halving the ffmpeg process count for overlay videos.
+    """
+    utc_dt = memory.date.astimezone(timezone.utc)
+    creation = utc_dt.strftime("%Y-%m-%dT%H:%M:%S.000000Z")
+    flags = ["-map_metadata", "0", "-metadata", f"creation_time={creation}"]
+    gps_iso = _gps_iso6709(memory)
+    if gps_iso:
+        flags += ["-metadata", f"location={gps_iso}", "-metadata", f"location-eng={gps_iso}"]
+    return flags
+
+
 def _set_video_container_date(file_path: Path, memory: Memory) -> bool:
     """Set the MP4/MOV container ``creation_time`` (and location) via a fast
-    ffmpeg ``-c copy`` remux.
+    ffmpeg ``-c copy`` remux, in place.
 
     Many tools (Windows Explorer "Media created", Google Photos, players) read
     the container ``creation_time`` in the ``mvhd``/``udta`` box rather than the
@@ -105,24 +122,15 @@ def _set_video_container_date(file_path: Path, memory: Memory) -> bool:
     if not ffmpeg:
         return False
 
-    utc_dt = memory.date.astimezone(timezone.utc)
-    creation = utc_dt.strftime("%Y-%m-%dT%H:%M:%S.000000Z")
     startupinfo, creationflags = subprocess_flags()
     tmp = tmp_sibling(file_path)
 
     cmd = [
         ffmpeg, "-nostdin", "-y",
         "-i", str(file_path),
-        "-map", "0", "-c", "copy", "-map_metadata", "0",
-        "-metadata", f"creation_time={creation}",
+        "-map", "0", "-c", "copy", *video_metadata_ffmpeg_flags(memory),
+        str(tmp),
     ]
-    gps_iso = _gps_iso6709(memory)
-    if gps_iso:
-        cmd += [
-            "-metadata", f"location={gps_iso}",
-            "-metadata", f"location-eng={gps_iso}",
-        ]
-    cmd.append(str(tmp))
 
     try:
         r = subprocess.run(
@@ -145,20 +153,58 @@ def _set_video_container_date(file_path: Path, memory: Memory) -> bool:
     return False
 
 
-def apply_video_metadata(file_path: Path, memory: Memory):
-    """Apply MP4/MOV metadata: always write capture date; GPS when available.
+def copy_video_with_metadata(src: Path, dest: Path, memory: Memory) -> bool:
+    """Copy a video to ``dest`` with the capture date/GPS already embedded,
+    in a single ffmpeg ``-c copy`` pass.
 
-    Sets both the container ``creation_time`` (recognized by Explorer, Photos,
-    players) and the iTunes-style ``\xa9day``/``\xa9xyz`` atoms (used by SMD's
-    own GPS map and Apple software).
+    Used instead of "plain file copy, then a separate metadata remux" for
+    videos that don't need an overlay burned in - that used to mean every
+    byte of the file was read and written twice; this does it once. Falls
+    back to a plain copy (via the caller) if ffmpeg isn't available or the
+    pass fails, so no run ever waits on this path to fail non-silently.
     """
-    # Container-level date/location first (ffmpeg remux), so the mutagen atoms
-    # added below survive on the final file.
-    try:
-        _set_video_container_date(file_path, memory)
-    except Exception:
-        pass
+    from smd.ffmpeg_bundle import resolve_ffmpeg
+    from smd.fsutil import tmp_sibling
+    from smd.procutil import subprocess_flags
 
+    ffmpeg = resolve_ffmpeg()
+    if not ffmpeg:
+        return False
+
+    startupinfo, creationflags = subprocess_flags()
+    tmp = tmp_sibling(dest)
+
+    cmd = [
+        ffmpeg, "-nostdin", "-y",
+        "-i", str(src),
+        "-map", "0", "-c", "copy", *video_metadata_ffmpeg_flags(memory),
+        str(tmp),
+    ]
+
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+            timeout=180,
+        )
+        if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+            os.replace(tmp, dest)
+            return True
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    if tmp.exists():
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+    return False
+
+
+def _apply_video_mutagen_tags(file_path: Path, memory: Memory) -> None:
+    """Write the iTunes-style ``\xa9day``/``\xa9xyz`` atoms mutagen exposes -
+    used by SMD's own GPS map and Apple software. Pure Python, no subprocess."""
     try:
         video = MP4(str(file_path))
         date_iso = get_local_datetime(memory).strftime("%Y-%m-%dT%H:%M:%S%z")
@@ -177,7 +223,27 @@ def apply_video_metadata(file_path: Path, memory: Memory):
     except Exception:
         pass
 
-def apply_metadata(file_path: Path, memory: Memory, file_ext: str):
+
+def apply_video_metadata(file_path: Path, memory: Memory, *, container_date_done: bool = False):
+    """Apply MP4/MOV metadata: always write capture date; GPS when available.
+
+    Sets both the container ``creation_time`` (recognized by Explorer, Photos,
+    players) and the iTunes-style ``\xa9day``/``\xa9xyz`` atoms (used by SMD's
+    own GPS map and Apple software).
+
+    ``container_date_done`` lets a caller that already embedded the container
+    date in an earlier ffmpeg pass (overlay merge or ``copy_video_with_metadata``)
+    skip the separate remux here and only apply the mutagen atoms.
+    """
+    if not container_date_done:
+        try:
+            _set_video_container_date(file_path, memory)
+        except Exception:
+            pass
+
+    _apply_video_mutagen_tags(file_path, memory)
+
+def apply_metadata(file_path: Path, memory: Memory, file_ext: str, *, container_date_done: bool = False):
     """Facade function to apply best-effort metadata using Pure Python libraries."""
     try:
         # 1. Native Python libraries (Fast, basic)
@@ -185,7 +251,7 @@ def apply_metadata(file_path: Path, memory: Memory, file_ext: str):
             add_exif_data_img(file_path, memory)
             
         elif file_ext.lower() in [".mp4", ".mov"]:
-            apply_video_metadata(file_path, memory)
+            apply_video_metadata(file_path, memory, container_date_done=container_date_done)
         
         else:
             # Other formats (PNG, WEBP, GIF, MKV) - Metadata writing skipped (Safe)
@@ -330,6 +396,54 @@ def _parse_iso6709(value):
             return float(m.group(1)), float(m.group(2))
     except Exception:
         return None
+    return None
+
+def read_video_capture_time(video_path: Path) -> datetime | None:
+    """Read a video's own embedded ``creation_time``, before SMD writes
+    anything to it - this is the phone's own encoder timestamp, present on
+    Snapchat's bundled export files straight out of the ZIP.
+
+    Used by ``local_pipeline.build_deterministic_match_map`` to correctly
+    order same-day videos when Snapchat's export has no reusable media id
+    (see agent-docs/DECISIONS.md, "2026-07-14 - video matching uses each
+    file's own creation_time"). Snapchat does not preserve this signal for
+    photos (no EXIF at all in exported images), so this only helps videos.
+    """
+    if not _FFPROBE_AVAILABLE:
+        return None
+    ffprobe = resolve_ffprobe()
+    if not ffprobe:
+        return None
+
+    from smd.procutil import subprocess_flags
+
+    startupinfo, creationflags = subprocess_flags()
+    try:
+        result = subprocess.run(
+            [
+                ffprobe, "-v", "quiet",
+                "-show_entries", "format_tags=creation_time",
+                "-of", "default=nk=1:nw=1",
+                str(video_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError):
+        return None
+
+    raw = result.stdout.strip()
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
     return None
 
 def _extract_gps_ffprobe(video_path: Path):
