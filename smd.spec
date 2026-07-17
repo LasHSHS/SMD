@@ -2,12 +2,12 @@
 """
 SMD all-in-one Windows build (portable folder).
 
-Includes: Python runtime, PyQt5 + WebEngine, ffmpeg, timezone data, folium assets.
+Includes: Python runtime, PyQt5 + WebEngine, ffmpeg, folium assets.
 End users run dist/smd/SMD.exe — no Python, pip, or separate tool installs.
 """
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_all, collect_data_files
+from PyInstaller.utils.hooks import collect_all
 
 datas = []
 binaries = []
@@ -26,8 +26,6 @@ hiddenimports = [
     'mutagen',
     'exif',
     'pydantic',
-    'pytz',
-    'timezonefinder',
     'PIL',
     'folium',
     'branca',
@@ -41,7 +39,6 @@ for pkg in (
     'psutil',
     'folium',
     'branca',
-    'timezonefinder',
     'mutagen',
     'numpy',
 ):
@@ -52,11 +49,6 @@ for pkg in (
         hiddenimports += tmp[2]
     except Exception:
         pass
-
-try:
-    datas += collect_data_files('timezonefinder')
-except Exception:
-    pass
 
 icon_file = Path('icon.ico')
 icon_arg = str(icon_file) if icon_file.is_file() else None
@@ -80,6 +72,11 @@ if ui_assets.is_dir():
     for f in sorted(ui_assets.iterdir()):
         if f.is_file():
             datas.append((str(f), 'assets/ui'))
+
+for name in ('icon.ico', 'icon.png'):
+    f = Path('assets') / name
+    if f.is_file():
+        datas.append((str(f), 'assets'))
 
 a = Analysis(
     ['desktop_gui_pyqt.py'],

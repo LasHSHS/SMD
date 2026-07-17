@@ -36,14 +36,68 @@ class SessionReport:
     safe_to_delete_staging: bool = False
     staging_deleted: bool = False
     staging_freed: str = ""
+    staging_kept_by_setting: bool = False
     quality_note: str = ""
     notes: list[str] = field(default_factory=list)
+    # Completeness: staging_main_count is the ground truth - how many memories
+    # SMD actually found to process for this export (matched from the JSON +
+    # ZIP staging). completeness_checked is True only when the full
+    # per-memory ffprobe/output-matching pass ran (check_staging_readiness);
+    # when staging is kept and that check is skipped, we still show the two
+    # cheap folder counts (merged_count/raw_count vs staging_main_count) but
+    # flag completeness_checked=False since that's a weaker (count-only, not
+    # per-file) signal.
+    staging_main_count: int = 0
+    outputs_verified: int = 0
+    missing_merged_count: int = 0
+    missing_raw_count: int = 0
+    completeness_checked: bool = False
+
+    def _completeness_banner(self) -> str:
+        """Prominent, plain-language answer to "did I lose any files?" -
+        shown before anything else so it can't be missed. Green only when
+        the exhaustive per-memory check actually ran and found zero gaps."""
+        style = (
+            "margin:0 0 14px 0;padding:12px 16px;border-radius:8px;"
+            "font-size:14px;{color}"
+        )
+        if self.completeness_checked:
+            missing = self.missing_merged_count + self.missing_raw_count
+            if missing == 0 and self.outputs_verified >= self.staging_main_count:
+                box = style.format(color="background:#1f4d2b;color:#c8f5d0;")
+                return (
+                    f"<div style='{box}'>✅ <b>All {self.staging_main_count:,} memories from "
+                    f"your export are in your library.</b> Every file SMD found in the "
+                    f"JSON + ZIP was verified present in merged/ (and raw/, if enabled) "
+                    f"- nothing is missing.</div>"
+                )
+            box = style.format(color="background:#5a2626;color:#ffd6d6;")
+            return (
+                f"<div style='{box}'>⚠ <b>{missing} of {self.staging_main_count:,} memories "
+                f"need attention.</b> {self.outputs_verified:,} verified OK, "
+                f"{self.missing_merged_count} missing from merged/, "
+                f"{self.missing_raw_count} missing from raw/. See Storage below, or "
+                f"re-run processing with the same account name to fill in the gaps.</div>"
+            )
+        # Full per-memory check was skipped ("Keep staging media files") -
+        # only cheap folder counts are available, so keep this neutral.
+        box = style.format(color="background:#3a3a1f;color:#f0e6b8;")
+        note = (
+            f"{self.merged_count:,} files in merged/ for {self.staging_main_count:,} "
+            f"memories detected in this export."
+        )
+        return (
+            f"<div style='{box}'>ℹ <b>Full per-file verification was skipped</b> because "
+            f"\"Keep staging media files\" is on. {note} If the counts don't roughly "
+            f"match, turn that setting off and re-run to get an exact check.</div>"
+        )
 
     def summary_html(self) -> str:
         status = "Completed successfully" if self.success else "Finished with issues"
         lines = [
             f"<h2>Processing summary</h2>",
             f"<p><b>Account:</b> {self.account_name}<br><b>Status:</b> {status}</p>",
+            self._completeness_banner(),
             "<h3>What ran</h3><ul>",
         ]
         for step in self.steps_completed:
@@ -83,7 +137,12 @@ class SessionReport:
             f"<li><b>Staging:</b> {self.staging_files:,} working files "
             f"({format_bytes(self.staging_bytes)})</li>"
         )
-        if self.safe_to_delete_staging:
+        if self.staging_kept_by_setting:
+            lines.append(
+                "<li>Staging kept because \"Keep staging media files\" is turned on - "
+                "the integrity check was skipped and technical/staging/ was left in place.</li>"
+            )
+        elif self.safe_to_delete_staging:
             if self.staging_deleted and self.staging_freed:
                 lines.append(f"<li>Staging cleaned up automatically ({self.staging_freed} freed).</li>")
             else:
@@ -117,6 +176,8 @@ def build_session_report(
     staging_deleted: bool = False,
     staging_freed: str = "",
     layout: AccountPaths | None = None,
+    readiness=None,
+    skip_staging_check: bool = False,
 ) -> SessionReport:
     paths = layout or resolve_account_paths(account_dir, migrate=False, create=False)
     account_name = paths.account_dir.name
@@ -137,7 +198,14 @@ def build_session_report(
             corrupt.append(p.name)
 
     duplicate_groups = load_cached_duplicate_group_count(paths)
-    readiness = check_staging_readiness(account_dir, layout=paths, require_raw=require_raw)
+    if skip_staging_check:
+        readiness = None
+    elif readiness is None:
+        # check_staging_readiness() ffprobes every video in staging, which is
+        # expensive on large libraries - callers that already ran it (e.g. the
+        # post-run StagingVerifyWorker) should pass the result in instead of
+        # paying for a second full scan here.
+        readiness = check_staging_readiness(account_dir, layout=paths, require_raw=require_raw)
 
     default_steps = steps or [
         "Detected export format",
@@ -168,12 +236,20 @@ def build_session_report(
         webp_outputs=webp_count,
         staging_bytes=folder_size_bytes(paths.staging_dir),
         merged_bytes=folder_size_bytes(paths.merged_dir),
-        safe_to_delete_staging=readiness.safe_to_delete,
+        safe_to_delete_staging=readiness.safe_to_delete if readiness is not None else False,
         staging_deleted=staging_deleted,
         staging_freed=staging_freed,
+        staging_kept_by_setting=skip_staging_check,
+        staging_main_count=readiness.staging_main_count if readiness is not None else staging_main,
+        outputs_verified=readiness.outputs_verified if readiness is not None else 0,
+        missing_merged_count=len(readiness.missing_merged) if readiness is not None else 0,
+        missing_raw_count=len(readiness.missing_raw) if readiness is not None else 0,
+        completeness_checked=readiness is not None,
         quality_note=(
             "Photos are saved at maximum JPEG quality. "
-            "Video overlays use lossless encoding when Snapchat filters are merged."
+            "Video overlays are re-encoded at visually lossless quality when "
+            "Snapchat filters are merged, without the huge file sizes of true "
+            "lossless encoding."
         ),
     )
     if stats and stats.failed:

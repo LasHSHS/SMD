@@ -24,8 +24,9 @@ Process Snapchat Memories exports locally on your PC: extract bundled media, mer
 
 ## Platform Support
 
-- Official target for v1: **Windows 10/11 (64-bit)**
-- Python source can run cross-platform, but release QA currently focuses on Windows builds
+- Official target for v1: **Windows 10/11 (64-bit)** — this is the only platform built, tested, and supported by the maintainer.
+- The Python/PyQt5 source is cross-platform in principle, but there is no macOS, Linux, Android, or iOS build, and none is currently planned by the maintainer (no hardware to build or test on).
+- **Contributions welcome:** if you'd like to port SMD to macOS, Linux, Android, or iOS, PRs are very welcome. Please open an issue first to discuss packaging/signing approach for that platform before submitting a large PR.
 
 ## Quick Start (User)
 

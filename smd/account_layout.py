@@ -291,13 +291,18 @@ checkpoint/  Resume state (local_checkpoint.json) - lets interrupted runs contin
 
 quarantine/  Broken or unusable files isolated during processing.
 
-logs/        Error logs from failed runs.
+logs/        Error logs from failed runs, plus a full run_activity log per run.
 
 debug/       Processing diagnostics and logs
 
 Your photos and videos
 ----------------------
 Open: ../downloads/merged/  (with overlays)
-      ../downloads/raw/     (without overlays)
-      ../downloads/duplicates/  (extra byte-identical copies - review & delete manually)
+      ../downloads/raw/     (without overlays, only if "Also save without filters" was on)
+
+Byte-identical duplicates are NOT moved to a separate folder. Use "Review
+duplicates" in the app to see them side by side (with thumbnails/duration for
+video) and choose which copy to keep; anything not kept is permanently
+deleted from both merged/ and raw/, and the deletion is recorded in
+reports/duplicates_deleted_report_*.json.
 """

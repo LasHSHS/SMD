@@ -1,0 +1,26 @@
+---
+description: Read and maintain agent-docs/ARCHITECTURE.md and DECISIONS.md when working on SMD
+alwaysApply: true
+---
+
+# Agent docs: read before, update after
+
+Before making changes or answering questions about how SMD behaves, read
+`agent-docs/ARCHITECTURE.md` (module map, data flow, gotchas) and
+`agent-docs/DECISIONS.md` (why non-obvious choices were made). They exist so
+you don't have to re-derive the whole codebase from scratch every session.
+
+These are navigation aids, not a spec - they can go stale. If a user
+question is about exact current behavior (especially anything touching data
+safety, file deletion, or matching/verification logic), verify against the
+actual source file/function before answering, don't just trust the doc.
+
+After any structural or behavioral change (new module, changed data flow,
+changed default, changed concurrency/safety behavior), update the relevant
+section of `ARCHITECTURE.md`. If the change involved a non-obvious "why"
+(a trade-off, a bug root-cause, a rejected alternative), add a dated entry
+to the top of `DECISIONS.md` instead of leaving the reasoning only in chat.
+
+Keep both files terse and pointing at real file/function names rather than
+duplicating code. Don't create empty placeholder sections "to fill in
+later" - only add content once it's verified against the actual code.

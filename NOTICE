@@ -46,14 +46,6 @@ folium
   Map tiles (e.g. OpenStreetMap) are (C) their respective providers and
   are only requested when the GPS map view is opened.
 
-timezonefinder
-  License: MIT.
-  Copyright (C) Jannik Michelfeit.
-
-pytz
-  License: MIT.
-  Copyright (C) Stuart Bishop.
-
 psutil
   License: BSD 3-Clause.
   Copyright (C) Giampaolo Rodola.

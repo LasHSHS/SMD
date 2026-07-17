@@ -9,13 +9,13 @@ THEME_LIGHT = "light"
 THEME_DARK = "dark"
 
 # Layout tokens (px) — tuned for 1080p–1440p Windows displays
-WINDOW_MIN_WIDTH = 960
+WINDOW_MIN_WIDTH = 1000
 WINDOW_MIN_HEIGHT = 680
 SIDEBAR_WIDTH = 220
-CONTENT_MAX_FORM = 1370
+CONTENT_MAX_FORM = 1270
 CONTENT_MIN_FORM = 720
-CONTENT_MAX_DOCS = 1370
-CONTENT_MAX_NARROW = 1370
+CONTENT_MAX_DOCS = 1270
+CONTENT_MAX_NARROW = 1270
 PAGE_MARGIN_H = 28
 PAGE_MARGIN_V = 20
 CONTENT_AREA_MARGIN_H = PAGE_MARGIN_H
@@ -38,9 +38,9 @@ FONT_SIZE_TAB = 16
 FONT_SIZE_TITLE = 20
 FONT_SIZE_SECTION = 16
 FONT_SIZE_TOOLBAR = 14
-TAB_MIN_WIDTH = 148
+TAB_MIN_WIDTH = 90
 TAB_PADDING_V = 12
-TAB_PADDING_H = 32
+TAB_PADDING_H = 20
 
 # Brand palette — light: yellow primary, dark orange secondary
 LIGHT_PRIMARY = "#F5C400"
@@ -78,6 +78,16 @@ WARNING = "#C45C0A"
 WARNING_DARK = "#D4A82A"
 ERROR = "#C42B2B"
 ERROR_DARK = "#FF6B6B"
+
+# Controls that only appear once "Technical view" is enabled are styled in
+# this color so it is obvious at a glance they are advanced settings, not
+# meant for the average user.
+TECHNICAL_TEXT_STYLE = f"color: {ERROR};"
+TECHNICAL_TEXT_STYLE_DARK = f"color: {ERROR_DARK};"
+
+
+def technical_text_style(dark: bool) -> str:
+    return TECHNICAL_TEXT_STYLE_DARK if dark else TECHNICAL_TEXT_STYLE
 
 # Legacy aliases (prefer palette helpers below)
 ACCENT = LIGHT_SECONDARY
@@ -350,7 +360,9 @@ def _tabs_main(p: dict[str, str]) -> str:
 QTabWidget#mainTabs > QTabBar::tab, QTabWidget#resultsTabs > QTabBar::tab {{
     background: {p['tab_bg']};
     color: {p['tab_fg']};
-    border: 1px solid {p['border']};
+    border-left: 1px solid {p['border']};
+    border-right: 1px solid {p['border']};
+    border-top: none;
     border-bottom: none;
     padding: {TAB_PADDING_V}px {TAB_PADDING_H}px;
     min-width: {TAB_MIN_WIDTH}px;
@@ -411,7 +423,6 @@ QLabel {{
 }}
 QWidget#appHeader {{
     background-color: {p['raised']};
-    border-bottom: 1px solid {p['header_border']};
 }}
 QWidget#tabsShell {{
     background-color: {p['bg']};

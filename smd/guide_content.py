@@ -4,7 +4,7 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
-GUIDE_IMAGE_WIDTH = 280
+GUIDE_IMAGE_WIDTH = 360
 
 _STYLES = f"""
 body {{ margin: 0; line-height: 1.55; }}
@@ -24,10 +24,13 @@ body {{ margin: 0; line-height: 1.55; }}
     background: rgba(128, 128, 128, 0.15); padding: 1px 5px; border-radius: 4px;
 }}
 .guide-intro {{ margin: 0 0 28px; line-height: 1.65; font-size: 16px; }}
-.guide-img-wrap {{ text-align: center; margin: 20px 0 8px; }}
+.guide-img-wrap {{
+    text-align: center; margin: 20px 0 8px; line-height: normal;
+}}
 .guide-img {{
     max-width: 100%; height: auto;
     border: 1px solid #555; border-radius: 12px;
+    vertical-align: top;
 }}
 .guide-missing {{
     color: #c45c0a; font-size: 13px; margin: 12px 0; font-style: italic;
@@ -52,6 +55,10 @@ def _scaled_image_size(path: Path, target_width: int) -> tuple[int, int]:
     Qt's rich-text layout reserves an image's *native* height even when CSS
     scales its width, which leaves large vertical gaps. Emitting explicit
     width+height attributes makes the layout reserve the correct scaled height.
+
+    Never upscales past the source's native width - these are phone
+    screenshots, so stretching a smaller one past its real resolution would
+    just make it blurrier, not bigger in any useful sense.
     """
     try:
         from PIL import Image
@@ -59,7 +66,8 @@ def _scaled_image_size(path: Path, target_width: int) -> tuple[int, int]:
         with Image.open(path) as img:
             w, h = img.size
         if w > 0:
-            return target_width, max(1, round(target_width * h / w))
+            width = min(target_width, w)
+            return width, max(1, round(width * h / w))
     except Exception:
         pass
     return target_width, target_width

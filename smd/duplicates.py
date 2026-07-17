@@ -110,30 +110,55 @@ def scan_content_duplicates(
         return report
 
     status(f"Checking for duplicate files (0/{total})...")
+    size_buckets: dict[int, list[Path]] = {}
+    for path in files:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = -1
+        size_buckets.setdefault(size, []).append(path)
+
     digest_to_files: dict[str, list[Path]] = {}
+    paths_to_hash: list[Path] = []
+    for size, bucket in size_buckets.items():
+        if len(bucket) < 2:
+            continue
+        paths_to_hash.extend(bucket)
+
+    hash_total = len(paths_to_hash)
+    if hash_total == 0:
+        report.merged_scanned = total
+        paths.reports_dir.mkdir(parents=True, exist_ok=True)
+        (paths.reports_dir / "duplicates_report.json").write_text(
+            json.dumps(report.to_dict(), indent=2),
+            encoding="utf-8",
+        )
+        return report
+
     workers = max(1, min(int(hash_workers), 16))
-    progress_every = max(25, total // 40)
+    progress_every = max(25, hash_total // 40)
     done = 0
 
-    if workers == 1 or total < 50:
-        for path in files:
+    if workers == 1 or hash_total < 50:
+        for path in paths_to_hash:
             digest = _file_hash(path)
             digest_to_files.setdefault(digest, []).append(path)
             done += 1
             report.merged_scanned = done
-            if done == 1 or done == total or done % progress_every == 0:
-                status(f"Checking for duplicate files ({done}/{total})...")
+            if done == 1 or done == hash_total or done % progress_every == 0:
+                status(f"Checking for duplicate files ({done}/{hash_total})...")
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(_file_hash, path): path for path in files}
+            futures = {executor.submit(_file_hash, path): path for path in paths_to_hash}
             for fut in as_completed(futures):
                 path = futures[fut]
                 digest = fut.result()
                 digest_to_files.setdefault(digest, []).append(path)
                 done += 1
                 report.merged_scanned = done
-                if done == 1 or done == total or done % progress_every == 0:
-                    status(f"Checking for duplicate files ({done}/{total})...")
+                if done == 1 or done == hash_total or done % progress_every == 0:
+                    status(f"Checking for duplicate files ({done}/{hash_total})...")
+    report.merged_scanned = total
 
     # Optional second pass: copy entire duplicate groups out for inspection.
     if move_to_folder:
