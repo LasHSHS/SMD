@@ -21,12 +21,12 @@ result. No network calls in the core pipeline. Not affiliated with Snap Inc.
 
 ## Top-level layout
 
-- `desktop_gui_pyqt.py` - the entire GUI: main window, all 5 tabs, dialogs,
-  background `QThread` workers. One large file (~6600 lines, growing); see
-  "GUI" below for the class map. Known maintainability debt - a planned
-  split into multiple modules (workers/tabs/dialogs) is intentionally
-  deferred until pipeline integration test coverage (below) is in place
-  first, so the split has a regression safety net.
+- `desktop_gui_pyqt.py` - thin entry script (~550 lines): early
+  `pythonw` stdout redirect, `DownloaderGUI` (`__init__` + slim `init_ui`
+  shell that wires tab mixins), and `main()`. PyInstaller/`Run-SMD.bat`
+  still point here; they follow the `gui/` imports automatically.
+- `gui/` - split-out desktop GUI package (mixin pattern, zero behavior
+  change from the old god file). See "GUI" below for the class map.
 - `smd/` - all backend logic, importable independently of the GUI (and unit
   tested that way - see `tests/`).
 - `tests/` - pytest suite, no GUI/Qt dependency, runs in ~1s. Most files
@@ -170,7 +170,7 @@ This check is expensive (minutes on a large library) and runs in
 it gets used:
 
 1. **Automatically after every run** (`_finish_completion_summary` in
-   `desktop_gui_pyqt.py`) - if it comes back 100% clean, `technical/staging/`
+   `gui/tabs/completion.py`) - if it comes back 100% clean, `technical/staging/`
    is deleted **silently**, no confirmation dialog. This is intentional: the
    average user never sees or understands "staging" and shouldn't have to.
 2. **Manually via "Verify staging"** button (Technical view only) - same
@@ -189,37 +189,54 @@ was skipped ("Keep staging media files"), the banner falls back to the
 cheap always-available folder counts and says so explicitly rather than
 claiming a full check happened (added 2026-07-17).
 
-## GUI (`desktop_gui_pyqt.py`)
+## GUI (`gui/` package + thin `desktop_gui_pyqt.py`)
 
-Main window: `DownloaderGUI(QMainWindow)`. Five tabs (`self.tabs`, a
-`QTabWidget`): **Guide**, **Save memories** (the main workflow - Setup,
-Performance, Run, After-processing sections, stacked in a single column via
-`_rebuild_process_controls_grid`), **File Checker** (folder scan + GPS map),
-**Help**, **About**. The tab bar does **not** use `setExpanding(True)` -
-each tab sizes to its own text via Qt's normal sizeHint, so the longest
-label ("Save memories") can never get squeezed/clipped by shorter tabs
-being forced to equal width (fixed 2026-07-12).
+Main window: `DownloaderGUI(QMainWindow, WindowChromeMixin, GuideTabMixin,
+SaveMemoriesTabMixin, FileCheckerTabMixin, CompletionMixin,
+HelpAboutTabMixin)`. Mixins share `self` with the main window - method
+bodies moved, call sites unchanged. One-way import rule: `gui/tabs/*` and
+`gui/window_chrome.py` may import from `gui/common.py` /
+`gui/widgets.py` / `gui/workers.py` / `gui/dialogs.py`, never from each
+other or back into `desktop_gui_pyqt.py`.
 
-Key background workers (`QThread` subclasses) - all processing/scanning that
-could take more than a fraction of a second runs off the GUI thread:
+Layout of `gui/`:
+
+- `common.py` - `ROOT`, `TAB_SAVE_MEMORIES`, WebEngine availability,
+  panel builders, `play_happy_tone`, `startup_log`, etc.
+- `widgets.py` - reusable widgets (`DocBrowser`, `WidthAwareColumn`,
+  `LiveRunDashboard`, `ProcessingShieldOverlay`, `_MainTabBar`, …).
+- `workers.py` - all ten `QThread` workers + map/thumbnail helpers.
+- `dialogs.py` - `DuplicateCompareDialog`, `SessionSummaryDialog`,
+  `DuplicateReviewDialog`.
+- `single_instance.py` - single-instance lock.
+- `window_chrome.py` - `WindowChromeMixin` (theme, nav/section helpers,
+  technical-view toggle, close/cleanup).
+- `tabs/guide_tab.py`, `tabs/save_memories_tab.py`, `tabs/completion.py`,
+  `tabs/file_checker_tab.py`, `tabs/help_about_tabs.py` - tab mixins.
+
+Five tabs (`self.tabs`): **Guide**, **Save memories** (Setup / Performance /
+Run / After-processing via `_rebuild_process_controls_grid`), **File
+Checker**, **Help**, **About**. The tab bar does **not** use
+`setExpanding(True)` - each tab sizes to its own text via Qt's normal
+sizeHint so "Save memories" cannot get clipped (fixed 2026-07-12).
+
+Key background workers (`gui/workers.py`) - anything that could take more
+than a fraction of a second runs off the GUI thread:
 
 - `LocalExportWorker` - runs `process_bundled_export`, emits progress.
 - `StagingVerifyWorker` / `StagingCheckWorker` - staging readiness check.
 - `DuplicateScanWorker` - content-hash duplicate scan.
-- `MapRenderWorker`, `MapWorker`, `ScanWorker` - File Checker tab (thumbnails,
-  GPS map, folder scan).
+- `MapRenderWorker`, `MapWorker`, `ScanWorker` - File Checker tab.
 
-`self.map_view` (the GPS map widget) is **not** created in `init_ui()` -
-it's `None` behind a cheap placeholder label until `_ensure_map_view()`
-runs, which happens the first time the user opens File Checker
-(`_on_main_tab_changed`). This is deliberate: constructing a
-`QWebEngineView` spins up Qt's embedded-Chromium subsystem (separate
-`QtWebEngineProcess.exe` helper processes), the single most expensive thing
-this app can do, and doing it eagerly for every launch made startup slow
-for the ~4/5 of tabs that never touch it (fixed 2026-07-12). Any new code
-that touches `self.map_view` must call `self._ensure_map_view()` first.
+`self.map_view` is **not** created in `init_ui()` - it's `None` behind a
+placeholder until `_ensure_map_view()` (`FileCheckerTabMixin`) runs on
+first File Checker open (`WindowChromeMixin._on_main_tab_changed`).
+Constructing a `QWebEngineView` spins up Qt WebEngine (separate helper
+processes); doing it eagerly made every launch pay that cost (fixed
+2026-07-12). Any new code that touches `self.map_view` must call
+`self._ensure_map_view()` first.
 
-## File Checker tab (report-only, `desktop_gui_pyqt.py`)
+## File Checker tab (report-only, `gui/tabs/file_checker_tab.py`)
 
 `run_full_analysis()` always runs `ScanWorker(..., dry_run=True)` - it never
 renames anything. Extension fixing is not a separate step users need to run:

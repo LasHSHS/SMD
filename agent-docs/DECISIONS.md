@@ -11,6 +11,27 @@ relevant file/function instead of pasting code.
 
 ---
 
+### 2026-07-17 - Split `desktop_gui_pyqt.py` into `gui/` package via mixins
+
+**What**: Relocated the ~6,500-line god file into `gui/` (`common`,
+`widgets`, `workers`, `dialogs`, `single_instance`, `window_chrome`, and
+`tabs/*` mixins). `desktop_gui_pyqt.py` is now a thin entry
+(`DownloaderGUI.__init__` + slim `init_ui` shell + `main()`). Entry path
+for PyInstaller/`Run-SMD.bat` unchanged.
+
+**Why mixins (not composition)**: every tab/handler already used `self.foo`
+across concerns; mixins preserve that shared state without a months-long
+redesign of attribute ownership. Pure move-and-rewire - no intentional
+behavior change. Ordered Phase 1 (self-contained workers/widgets/dialogs)
+before Phase 2 (DownloaderGUI mixins, lowest-risk Help/Guide first, then
+chrome, File Checker, Save memories/completion) so each step stayed
+bisectable. Done *after* `test_full_pipeline_integration.py` so the
+backend risk surface had a regression net before the GUI refactor.
+
+**Import rule**: tabs/chrome import from common/widgets/workers/dialogs
+only - never peer tabs, never back into the entry script - to avoid
+circular imports.
+
 ### 2026-07-17 - App icon reverted to original yellow logo; full-pipeline integration test added before the planned god-file split
 
 **What (icon)**: The DALL-E-generated icon added earlier the same day was
