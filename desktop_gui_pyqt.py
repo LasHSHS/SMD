@@ -102,10 +102,11 @@ from gui.workers import (
     generate_thumbnail_base64,
 )
 from gui.single_instance import SingleInstance
+from gui.tabs.guide_tab import GuideTabMixin
 from gui.tabs.help_about_tabs import HelpAboutTabMixin
 
 
-class DownloaderGUI(QMainWindow, HelpAboutTabMixin):
+class DownloaderGUI(QMainWindow, GuideTabMixin, HelpAboutTabMixin):
     def __init__(self):
         super().__init__()
         # Set window flags to ensure it shows in taskbar
@@ -581,16 +582,7 @@ class DownloaderGUI(QMainWindow, HelpAboutTabMixin):
         # why QSS padding/min-width alone wasn't a reliable enough fix.
         self.tabs.setTabBar(_MainTabBar())
 
-        # --- Tab 1: Guide (request export from Snapchat) ---
-        guide_tab = self._make_tab_page()
-        guide_inner = build_guide_panel(
-            lambda: self.tabs.setCurrentIndex(self._tab_process)
-        )
-        guide_inner.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        guide_tab_layout = QVBoxLayout(guide_tab)
-        guide_tab_layout.setContentsMargins(0, 0, 0, 0)
-        guide_tab_layout.addWidget(self._doc_tab(guide_inner))
-        self.tabs.addTab(guide_tab, 'Guide')
+        self._add_guide_tab()
 
         # --- Tab 2: Save memories ---
         download_tab = self._make_tab_page()
