@@ -7,9 +7,6 @@ Created by: Las HS (https://github.com/LasHSHS)
 License: Open Source
 """
 
-# User-facing name for the main workflow tab (was "Process").
-TAB_SAVE_MEMORIES = "Save memories"
-
 import sys
 import os
 
@@ -39,20 +36,16 @@ if sys.stdout is None or sys.stderr is None:
     if sys.stderr is None:
         sys.stderr = _early_log
 
-import subprocess
 import json
 import re
-import zipfile
 import shutil
 import base64
 import html
-import socket
 import atexit
 import psutil
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QFileDialog, QLineEdit,
                              QTextEdit, QTextBrowser, QComboBox, QSpinBox, QCheckBox, QTabWidget, QTabBar, QProgressBar, QToolTip, QSizePolicy, QSplashScreen, QGroupBox, QGridLayout,
                              QRadioButton, QButtonGroup, QFrame, QPlainTextEdit, QMenu, QScrollArea, QLayout, QGraphicsOpacityEffect)
@@ -60,117 +53,26 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer, QObject, pyqtSlo
 from PyQt5.QtGui import QFont, QIcon, QColor, QDesktopServices, QCursor, QPixmap, QPainter
 from PyQt5.QtWidgets import QMessageBox
 from PyQt5.QtWidgets import QDialog
-if os.environ.get('SMD_DISABLE_WEBENGINE') == '1':
-    QWebEngineView = None  # type: ignore
-    WEB_ENGINE_AVAILABLE = False
-else:
-    try:
-        from PyQt5.QtWebEngineWidgets import QWebEngineView  # Optional; excluded in lightweight builds
-        WEB_ENGINE_AVAILABLE = True
-    except Exception:
-        QWebEngineView = None  # type: ignore
-        WEB_ENGINE_AVAILABLE = False
-from PyQt5.QtMultimediaWidgets import QVideoWidget
-from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
-import folium
-from folium.plugins import MarkerCluster
-from PIL import Image
-from PIL.ExifTags import TAGS, GPSTAGS
-import tempfile
 from smd.grip_splitter import ResultsGripSplitter
-from PyQt5.QtCore import QSize
 
-# When frozen (PyInstaller), __file__ resolves inside _internal/, which is
-# regenerated wholesale on every build - use the exe's own directory instead.
-ROOT = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
-
-
-def _doc_browser_anchor_clicked(browser: QTextBrowser, url: QUrl) -> None:
-    """Scroll in-page for #anchors; open http(s) links externally."""
-    scheme = url.scheme().lower()
-    if scheme in ('http', 'https', 'mailto'):
-        QDesktopServices.openUrl(url)
-        return
-    fragment = url.fragment()
-    if fragment:
-        browser.scrollToAnchor(fragment)
-
-
-def build_help_panel() -> QWidget:
-    """Illustrative help - same DocBrowser style as the Guide tab."""
-    panel = QWidget()
-    lay = QVBoxLayout(panel)
-    lay.setContentsMargins(0, 0, 0, 0)
-    lay.setSpacing(0)
-
-    from smd.help_content import build_help_html
-
-    browser = DocBrowser()
-    browser.setOpenExternalLinks(False)
-    browser.setHtml(build_help_html(TAB_SAVE_MEMORIES))
-    browser.anchorClicked.connect(lambda url: _doc_browser_anchor_clicked(browser, url))
-    lay.addWidget(browser, 1)
-    return panel
-
-
-def build_about_panel() -> QWidget:
-    """About tab - version, credits, environment, and component status."""
-    panel = QWidget()
-    lay = QVBoxLayout(panel)
-    lay.setContentsMargins(0, 0, 0, 0)
-    lay.setSpacing(0)
-
-    from smd.about_content import build_about_html
-
-    browser = DocBrowser()
-    browser.setHtml(build_about_html(web_engine_available=WEB_ENGINE_AVAILABLE))
-    browser.anchorClicked.connect(lambda url: QDesktopServices.openUrl(url))
-    lay.addWidget(browser, 1)
-    return panel
-
-
-# Optional Windows-only happy tone
-try:
-    import winsound  # Available on Windows
-except Exception:
-    winsound = None
-
-def play_happy_tone():
-    """Play a short happy completion tone on Windows; no-op elsewhere."""
-    try:
-        if winsound:
-            winsound.Beep(880, 120)
-            winsound.Beep(1200, 160)
-            winsound.Beep(1500, 140)
-    except Exception:
-        pass
-
-def friendly_error_message(error_obj):
-    """Convert technical Python errors to friendly user messages."""
-    error_str = str(error_obj).lower()
-    error_type = type(error_obj).__name__
-    if 'permission' in error_str or 'permissionerror' in error_type:
-        return "The app doesn't have permission to access that folder. Check your Windows settings."
-    elif 'connectionerror' in error_type or 'timeout' in error_str or 'connection' in error_str:
-        return "Network error. Please check your internet connection and try again."
-    elif 'filenotfound' in error_type or 'no such file' in error_str:
-        return "File not found. The folder or file may have been moved or deleted."
-    elif 'module' in error_str:
-        return "A required component is missing. The app download may be corrupted. Please reinstall."
-    elif 'invalid' in error_str and 'credential' in error_str:
-        return "Invalid Snapchat username or password. Please check and try again."
-    elif 'json' in error_str:
-        return "The Snapchat data file is corrupted. Please download again."
-    else:
-        return f"An unexpected error occurred. Please try again. If this persists, contact support."
-
-
+from gui.common import (
+    ROOT,
+    TAB_SAVE_MEMORIES,
+    WEB_ENGINE_AVAILABLE,
+    QWebEngineView,
+    build_about_panel,
+    build_guide_panel,
+    build_help_panel,
+    configure_webengine_storage,
+    friendly_error_message,
+    play_happy_tone,
+    startup_log,
+)
 from gui.dialogs import (
     DuplicateCompareDialog,
     DuplicateReviewDialog,
     SessionSummaryDialog,
 )
-
 from gui.widgets import (
     DocBrowser,
     FittedPixmapLabel,
@@ -184,7 +86,6 @@ from gui.widgets import (
     WidthAwareColumn,
     _MainTabBar,
 )
-
 from gui.workers import (
     CompletionFinalizeWorker,
     DuplicatePreviewWorker,
@@ -200,29 +101,7 @@ from gui.workers import (
     _qpixmap_from_pil,
     generate_thumbnail_base64,
 )
-
-
-def build_guide_panel(go_to_process_cb) -> QWidget:
-    """Single-column guide: outer scroll only, text and screenshots stacked vertically."""
-    from smd.guide_content import build_guide_html, guide_assets_dir
-
-    panel = QWidget()
-    lay = QVBoxLayout(panel)
-    lay.setSpacing(12)
-    lay.setContentsMargins(0, 0, 0, 0)
-
-    browser = FlowDocBrowser()
-    browser.setSearchPaths([str(guide_assets_dir())])
-    browser.setHtml(build_guide_html(TAB_SAVE_MEMORIES))
-    browser.anchorClicked.connect(lambda url: QDesktopServices.openUrl(url))
-
-    go_btn = QPushButton(f'Go to {TAB_SAVE_MEMORIES}')
-    go_btn.setObjectName('accentBtn')
-    go_btn.clicked.connect(go_to_process_cb)
-
-    lay.addWidget(browser, 0)
-    lay.addWidget(go_btn, 0)
-    return panel
+from gui.single_instance import SingleInstance
 
 
 class DownloaderGUI(QMainWindow):
@@ -3546,34 +3425,6 @@ class DownloaderGUI(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, 'Preview Error', f'Could not display example image:\n{str(e)}')
 
-def _configure_webengine_storage() -> None:
-    """Use a dedicated WebEngine profile so stray pythonw processes cannot deadlock startup."""
-    if not WEB_ENGINE_AVAILABLE:
-        return
-    try:
-        from PyQt5.QtWebEngineWidgets import QWebEngineProfile
-
-        base = Path(os.environ.get('LOCALAPPDATA', Path.home())) / 'SnapchatMemoriesDownloader' / 'WebEngine'
-        base.mkdir(parents=True, exist_ok=True)
-        profile = QWebEngineProfile.defaultProfile()
-        profile.setCachePath(str(base / 'cache'))
-        profile.setPersistentStoragePath(str(base / 'storage'))
-    except Exception as exc:
-        print(f"DEBUG: WebEngine storage setup skipped: {exc}")
-
-
-def _startup_log(message: str) -> None:
-    """Append startup diagnostics to smd_gui.log (works under pythonw)."""
-    try:
-        with (ROOT / 'smd_gui.log').open('a', encoding='utf-8') as log_file:
-            log_file.write(message.rstrip() + '\n')
-            log_file.flush()
-    except OSError:
-        pass
-
-
-from gui.single_instance import SingleInstance  # noqa: E402
-
 
 if __name__ == '__main__':
     # Backend mode: allow the bundled exe to run the downloader instead of relaunching the GUI
@@ -3591,7 +3442,7 @@ if __name__ == '__main__':
         sys.exit(0)
 
     print("DEBUG: Starting application...")
-    _startup_log(f"DEBUG: Starting application (pid={os.getpid()})")
+    startup_log(f"DEBUG: Starting application (pid={os.getpid()})")
     sys.stdout.flush()
 
     if sys.platform == 'win32':
@@ -3629,7 +3480,7 @@ if __name__ == '__main__':
     os.environ["QTWEBENGINE_DISABLE_GPU"] = "1"
     
     app = QApplication(sys.argv)
-    _configure_webengine_storage()
+    configure_webengine_storage()
     app.setStyle('Fusion')
     from smd.theme import FONT_SIZE_BASE
     app_font = QFont('Segoe UI')
@@ -3723,7 +3574,7 @@ if __name__ == '__main__':
     gui.show()
     gui.raise_()
     gui.activateWindow()
-    _startup_log("DEBUG: main window shown")
+    startup_log("DEBUG: main window shown")
     try:
         from PyQt5.QtWidgets import QDesktopWidget
         screen = QApplication.desktop().availableGeometry(gui)
