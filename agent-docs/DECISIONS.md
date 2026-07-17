@@ -11,6 +11,80 @@ relevant file/function instead of pasting code.
 
 ---
 
+### 2026-07-17 - App icon reverted to original yellow logo; full-pipeline integration test added before the planned god-file split
+
+**What (icon)**: The DALL-E-generated icon added earlier the same day was
+reverted. The user wanted the original yellow download-arrow icon back
+(`icon.ico`/`icon.png`/`assets/icon.*`), which was still recoverable
+byte-for-byte from the `Baseline: SMD v1.0.0` commit. Restored via
+`git checkout 9d3e36f -- icon.ico assets/icon.ico assets/icon.png`, then
+copied to the loose root-level `icon.png` (never tracked, only used at
+runtime/build time) and rebuilt so both the taskbar and window titlebar
+pick it up. Lesson: don't redesign user-visible brand assets speculatively
+even when asked to "check if it's applied" - the ask was about the icon
+*pipeline* (missing files/AppUserModelID), not the artwork itself.
+
+**What (tests)**: Added `tests/test_full_pipeline_integration.py`, which
+drives `local_pipeline.process_bundled_export()` end to end (synthetic ZIP
+with real JPEGs + a real ffmpeg-generated MP4) instead of unit-testing
+helpers in isolation. Covers: extract -> JSON match -> merge/hardlink ->
+checkpoint -> simulated-crash resume (delete a merged/ output, rerun,
+confirm exactly the one broken item is repaired via
+`reconcile_checkpoint_with_disk`, not a full redo) -> `check_staging_readiness`.
+
+**Why**: User flagged (and I agreed) that the existing 47 unit tests run in
+under a second, which for an app whose core job is "don't lose someone's
+memories" is a signal they're each testing small helpers, not the actual
+risk surface. This integration test is the net that would catch a real
+data-loss bug. It was deliberately built *before* the `desktop_gui_pyqt.py`
+god-file split (also requested) so that large refactor has a regression
+safety net on the pipeline it doesn't even touch directly - the split is
+GUI-only, but confidence that "the pipeline still behaves" needed to exist
+independent of GUI changes. Uses `pytest.mark.skipif(not ffmpeg_available())`
+so CI/dev environments without ffmpeg degrade gracefully instead of failing.
+
+### 2026-07-17 - File Checker made read-only; no camera make/model stat; App icon added
+
+**What**: `run_full_analysis()` (`desktop_gui_pyqt.py`) now always runs
+`ScanWorker` with `dry_run=True` - File Checker reports mismatched
+extensions but never renames anything, on any folder. Extension fixing
+stays exactly where it already was: automatic, inside `_fix_extension()`
+(`smd/local_pipeline.py`), as part of every "Save memories" run.
+
+**Why**: user wanted a clean mental model - "File checker should only check
+files... the fixing stuff should be in save memories." Investigation showed
+the fixing already only ever happened in the Save Memories pipeline for
+SMD's own output; File Checker's rename-on-scan behavior was leftover
+functionality for arbitrary external folders that blurred that line and
+wasn't asked for.
+
+**What (metadata stats)**: Tested real Make/Model EXIF and video container
+tags on live Las-account output. Confirmed Snapchat strips all camera/device
+identifying metadata from both photos and videos before export (only
+`DateTime`/`GPSInfo`/`Orientation` survive on photos - and SMD wrote those -
+plus generic `Core Media Video/Audio` handler names on videos). Added a
+photo resolution breakdown to File Checker's media stats instead ("N unique
+resolutions, most common WxH") as an honest proxy stat, and explicitly did
+not add a fake "shot on which phone" feature since there is no real data
+behind it.
+
+**What (app icon)**: Added `icon.ico`/`icon.png` at repo root and under
+`assets/` - they did not exist anywhere in the repo before, despite four
+separate code paths (`apply_window_icon()`, the `DownloaderGUI.__init__`
+icon set, the header logo, the splash screen logo) all being wired up to
+load one if present. This is also why the *compiled* `SMD.exe` had no icon
+either, not just source/bat runs - `smd.spec`'s `icon_arg` silently
+resolved to `None`. Also added `SetCurrentProcessExplicitAppUserModelID`
+so Windows gives SMD its own taskbar identity instead of grouping it under
+pythonw.exe's generic icon when run from source.
+
+**Why not implement**: cloud upload, a media gallery grid, and macOS/Linux
+builds were re-confirmed out of scope per prior decisions (see below) after
+a competitor sweep (`canvases/smd-competitive-landscape.canvas.tsx`) turned
+up nothing that changed that calculus.
+
+---
+
 ### 2026-07-16 - Keep system/display awake for the duration of a run
 
 **What**: `_set_keep_awake()` (`desktop_gui_pyqt.py`) calls Win32

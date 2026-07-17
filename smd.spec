@@ -73,6 +73,11 @@ if ui_assets.is_dir():
         if f.is_file():
             datas.append((str(f), 'assets/ui'))
 
+for name in ('icon.ico', 'icon.png'):
+    f = Path('assets') / name
+    if f.is_file():
+        datas.append((str(f), 'assets'))
+
 a = Analysis(
     ['desktop_gui_pyqt.py'],
     pathex=[],

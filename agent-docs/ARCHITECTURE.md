@@ -22,11 +22,24 @@ result. No network calls in the core pipeline. Not affiliated with Snap Inc.
 ## Top-level layout
 
 - `desktop_gui_pyqt.py` - the entire GUI: main window, all 5 tabs, dialogs,
-  background `QThread` workers. One large file (~5800 lines); see "GUI"
-  below for the class map.
+  background `QThread` workers. One large file (~6600 lines, growing); see
+  "GUI" below for the class map. Known maintainability debt - a planned
+  split into multiple modules (workers/tabs/dialogs) is intentionally
+  deferred until pipeline integration test coverage (below) is in place
+  first, so the split has a regression safety net.
 - `smd/` - all backend logic, importable independently of the GUI (and unit
   tested that way - see `tests/`).
-- `tests/` - pytest suite, no GUI/Qt dependency, runs in a few seconds.
+- `tests/` - pytest suite, no GUI/Qt dependency, runs in ~1s. Most files
+  each unit-test one helper in isolation (matching, naming, hardlinking,
+  staging checks). `test_full_pipeline_integration.py` is the exception -
+  it drives the real top-level entry point (`local_pipeline.
+  process_bundled_export`) against a synthetic-but-real ZIP (real JPEGs,
+  a real tiny MP4 via the bundled ffmpeg) end to end: extract -> JSON
+  match -> merge/hardlink -> checkpoint -> simulated-crash resume ->
+  `check_staging_readiness`. This is the net that would actually catch a
+  bug that loses/corrupts memories; the narrower unit tests can't, since
+  each one mocks or bypasses the surrounding orchestration. Skips itself
+  if ffmpeg isn't resolvable in the environment.
 - `agent-docs/` - this file, `DECISIONS.md`, and packaging/publishing docs.
   Kept separate from user-facing `README.md`.
 - `build_smd.ps1`, `smd.spec` - PyInstaller build. `tools/ffmpeg/` holds the
@@ -167,6 +180,15 @@ The "Keep staging media files" checkbox (Technical view only, default off)
 skips step 1 entirely (no ffprobe check, no delete) - added 2026-07-11 for
 users who want manual control over when staging disappears.
 
+`SessionReport.summary_html()` (`smd/session_report.py`) leads with a
+completeness banner (green/red/neutral) answering "did I lose any files?"
+before anything else - built from `readiness.staging_main_count` (ground
+truth: how many memories were actually found to process) vs
+`outputs_verified`/`missing_merged`/`missing_raw`. When staging verification
+was skipped ("Keep staging media files"), the banner falls back to the
+cheap always-available folder counts and says so explicitly rather than
+claiming a full check happened (added 2026-07-17).
+
 ## GUI (`desktop_gui_pyqt.py`)
 
 Main window: `DownloaderGUI(QMainWindow)`. Five tabs (`self.tabs`, a
@@ -196,6 +218,37 @@ runs, which happens the first time the user opens File Checker
 this app can do, and doing it eagerly for every launch made startup slow
 for the ~4/5 of tabs that never touch it (fixed 2026-07-12). Any new code
 that touches `self.map_view` must call `self._ensure_map_view()` first.
+
+## File Checker tab (report-only, `desktop_gui_pyqt.py`)
+
+`run_full_analysis()` always runs `ScanWorker(..., dry_run=True)` - it never
+renames anything. Extension fixing is not a separate step users need to run:
+it already happens automatically inside `_fix_extension()`
+(`smd/local_pipeline.py`) as part of every "Save memories" run, before a
+file is written to `merged/`/`raw/`. File Checker exists to (a) report
+extension mismatches on *any* folder, including ones SMD never touched, and
+(b) show media stats + the GPS map - not to fix SMD's own output (fixed
+2026-07-17; previously it silently renamed files, which conflicted with the
+"check only" mental model this tab should have).
+
+Media stats (`MapWorker._append_media_stats`) also reports a resolution
+breakdown for photos (`_image_dimensions()` - cheap, `Image.open()` only
+reads the header) as a "how many different screens/devices, roughly" signal.
+Deliberately does **not** claim to show camera make/model or "which phone" -
+verified empirically that Snapchat strips all of that from both photos and
+videos before export (no `Make`/`Model` EXIF tag, no device info in video
+container tags either). Also deliberately skips video dimensions (would
+need a dedicated `ffprobe` call per video - real cost at 10k+ videos - for a
+"fun stats" feature that isn't worth the slowdown).
+
+Map tiles already flip to CartoDB dark_matter automatically in dark mode -
+`_map_base_tile(dark=...)` picks the tile set at render time
+(`_create_themed_map`), used for the default Copenhagen map
+(`init_default_map`) and every "Load GPS map" / "Check folder" render
+(`MapRenderWorker`). Toggling the app theme on an *already-open* map does
+not live-swap its tiles (see "Known sharp edges" below) - use the map's own
+layer-control (top right of the map) to switch basemaps without losing
+zoom/pan, or just reopen/rescan to get the theme-matched default.
 
 **"Technical view" checkbox** gates visibility of advanced controls (`Open
 technical folder`, `Verify staging`, `Open debug folder`,
@@ -266,3 +319,18 @@ duration of a run" (2026-07-16).
   styling a specific existing widget (e.g. red "technical" text), prefer
   setting it directly on the widget instance rather than fighting
   specificity in the global stylesheet.
+- App icon: `icon.ico`/`icon.png` live at repo root (used by `smd.spec` for
+  the compiled EXE's icon, and `apply_window_icon()`'s ROOT-based fallback)
+  *and* under `assets/` (used by the window/header/splash icon code paths,
+  and bundled into the frozen build via `smd.spec`'s `datas`). Both copies
+  must exist and stay in sync - several independent lookups check different
+  paths for historical reasons; there is no single source of truth here.
+  Missing either copy silently falls back to no icon (fixed 2026-07-17 - the
+  files didn't exist at all before, so every lookup was silently failing;
+  see DECISIONS.md).
+- Map theme sync is one-way: a map picks up the current theme *when it is
+  rendered*, but toggling the app theme does not retroactively re-tile an
+  already-open map (`toggle_dark_mode()` deliberately skips this - see
+  DECISIONS.md, "Map Theme Toggle Fix"). Don't re-add an automatic
+  re-render on theme toggle without solving the pan/zoom-reset regression it
+  caused before.

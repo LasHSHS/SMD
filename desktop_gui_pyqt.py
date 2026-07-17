@@ -649,40 +649,53 @@ class ProcessingShieldOverlay(QWidget):
         outer.setContentsMargins(32, 32, 32, 32)
         outer.addStretch(2)
 
-        panel = QFrame()
-        panel.setObjectName('contentPanel')
-        # Wide enough that the multi-line hint never wraps into a tall, clipped
-        # column on typical desktop windows. Height stays content-driven.
-        panel.setMinimumWidth(560)
-        panel.setMaximumWidth(720)
+        self._panel = QFrame()
+        self._panel.setObjectName('contentPanel')
+        # Modest floor size - just enough that 3 short wrapped lines never
+        # clip, without ballooning into empty whitespace for typical hints.
+        self._panel.setMinimumWidth(480)
+        self._panel.setMaximumWidth(640)
         from smd.theme import enable_styled_surface
 
-        enable_styled_surface(panel)
-        panel_lay = QVBoxLayout(panel)
-        panel_lay.setContentsMargins(40, 36, 40, 36)
-        panel_lay.setSpacing(18)
+        enable_styled_surface(self._panel)
+        panel_lay = QVBoxLayout(self._panel)
+        panel_lay.setContentsMargins(28, 22, 28, 22)
+        panel_lay.setSpacing(10)
 
-        title = QLabel('Verifying your files…')
-        title.setProperty('class', 'sectionHeader')
-        title.setAlignment(Qt.AlignCenter)
-        panel_lay.addWidget(title)
+        self.title_label = QLabel('Verifying your files…')
+        self.title_label.setProperty('class', 'sectionHeader')
+        self.title_label.setAlignment(Qt.AlignCenter)
+        panel_lay.addWidget(self.title_label)
 
         self.hint_label = QLabel('Please wait. SMD will show a summary when finished.')
         self.hint_label.setWordWrap(True)
         self.hint_label.setAlignment(Qt.AlignCenter)
         self.hint_label.setProperty('class', 'caption')
-        # Keep the hint from collapsing so multi-line text stays fully visible.
-        self.hint_label.setMinimumHeight(80)
+        # Enough for ~3 wrapped lines at the caption font size - fixes the
+        # earlier bug where a 0-height label clipped its own last line,
+        # without the previous overcorrection to a much taller fixed panel.
+        self.hint_label.setMinimumHeight(58)
         self.hint_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
         panel_lay.addWidget(self.hint_label)
 
-        outer.addWidget(panel, 0, Qt.AlignCenter)
+        outer.addWidget(self._panel, 0, Qt.AlignCenter)
         outer.addStretch(3)
+
+    def set_hint(self, text: str, *, title: str | None = None) -> None:
+        """Update the overlay copy and force a layout pass so nothing clips."""
+        if title is not None:
+            self.title_label.setText(title)
+        self.hint_label.setText(text)
+        self.hint_label.adjustSize()
+        self._panel.adjustSize()
+        self._panel.updateGeometry()
 
     def show_over(self) -> None:
         parent = self.parentWidget()
         if parent is not None:
             self.setGeometry(parent.rect())
+        self.hint_label.adjustSize()
+        self._panel.adjustSize()
         self.show()
         self.raise_()
 
@@ -1345,7 +1358,7 @@ class ScanWorker(QThread):
             self.total_scanned = total
 
             self.output.emit('\n' + '=' * 72)
-            title = 'File Extension Checker - Dry-Run Preview' if self.dry_run else 'File Extension Fixer - Magic Byte Scanner'
+            title = 'File Extension Checker - Read-Only Report' if self.dry_run else 'File Extension Fixer - Magic Byte Scanner'
             self.output.emit(title)
             self.output.emit('=' * 72)
             self.output.emit(f'\nScanning folder: {folder_path}')
@@ -1412,7 +1425,10 @@ class ScanWorker(QThread):
 
             if self.dry_run:
                 if self.planned_count > 0:
-                    self.output.emit(f'\n[~] {self.planned_count} files can be fixed. Click "Apply Fixes" to proceed.')
+                    self.output.emit(
+                        f'\n[~] {self.planned_count} file(s) have a mismatched extension. '
+                        'This is a read-only report - nothing was renamed.'
+                    )
                 else:
                     self.output.emit('\n[*] All files appear correctly labeled!')
             else:
@@ -1455,10 +1471,12 @@ class MapWorker(QThread):
         file_type = None
         embedded_coords = None
 
+        dimensions = None
         if suffix in IMAGE_EXTENSIONS:
             from smd.metadata import extract_gps_image
             embedded_coords = extract_gps_image(file_path)
             file_type = 'image'
+            dimensions = _image_dimensions(file_path)
         elif suffix in VIDEO_EXTENSIONS:
             from smd.metadata import extract_gps_video
             embedded_coords = extract_gps_video(file_path)
@@ -1488,6 +1506,7 @@ class MapWorker(QThread):
             'modified': file_path.stat().st_mtime,
             'gps_source': gps_source,
             'extension_mismatch': extension_mismatch,
+            'dimensions': dimensions,
         }
         if coords:
             base['coords'] = coords
@@ -1533,6 +1552,7 @@ class MapWorker(QThread):
             total_videos = 0
             file_types: dict[str, dict[str, int]] = {}
             extension_mismatches = 0
+            resolution_counts: dict[str, int] = {}
             gps_embedded = {'image': 0, 'video': 0}
             gps_json = {'image': 0, 'video': 0}
             gps_missing = {'image': 0, 'video': 0}
@@ -1576,6 +1596,7 @@ class MapWorker(QThread):
                                 'total_videos': total_videos,
                                 'file_types': file_types,
                                 'extension_mismatches': extension_mismatches,
+                                'resolution_counts': resolution_counts,
                                 'gps_embedded': gps_embedded,
                                 'gps_json': gps_json,
                                 'gps_missing': gps_missing,
@@ -1607,6 +1628,11 @@ class MapWorker(QThread):
 
                             if result.get('extension_mismatch'):
                                 extension_mismatches += 1
+
+                            dims = result.get('dimensions')
+                            if dims:
+                                res_key = f"{dims[0]}x{dims[1]}"
+                                resolution_counts[res_key] = resolution_counts.get(res_key, 0) + 1
 
                             file_modified = datetime.fromtimestamp(result['modified'])
                             metadata = {
@@ -1675,6 +1701,7 @@ class MapWorker(QThread):
                 'total_videos': total_videos,
                 'file_types': file_types,
                 'extension_mismatches': extension_mismatches,
+                'resolution_counts': resolution_counts,
                 'gps_embedded': gps_embedded,
                 'gps_json': gps_json,
                 'gps_missing': gps_missing,
@@ -1893,6 +1920,22 @@ def _video_frame_pil_image(video_path: Path) -> Image.Image | None:
         except OSError:
             pass
     return None
+
+
+def _image_dimensions(image_path: Path) -> tuple[int, int] | None:
+    """Cheap (width, height) read - Image.open() only parses the header, it
+    does not decode pixel data, so this is safe to call for every photo
+    during a File Checker scan without a meaningful speed cost.
+
+    Deliberately image-only: getting video dimensions needs a dedicated
+    ffprobe subprocess per file, which would meaningfully slow down
+    scanning a library with thousands of videos, for a "fun stats" feature.
+    """
+    try:
+        with Image.open(image_path) as img:
+            return img.size
+    except Exception:
+        return None
 
 
 def _pil_preview_image(media_path: Path, max_dim: int) -> Image.Image | None:
@@ -3672,8 +3715,8 @@ class DownloaderGUI(QMainWindow):
         self.scan_btn = QPushButton('Check folder')
         self.scan_btn.setObjectName('accentBtn')
         self.scan_btn.setToolTip(
-            'Pick a folder to check and fix file extensions, verify metadata, and build a GPS map. '
-            'Defaults to merged/ when a project exists.'
+            'Pick a folder to check file extensions, view metadata, and build a GPS map. '
+            'Read-only - nothing is renamed or modified. Defaults to merged/ when a project exists.'
         )
         self.scan_btn.clicked.connect(self.select_scan_folder)
         map_toolbar.addWidget(self.scan_btn)
@@ -5307,7 +5350,7 @@ class DownloaderGUI(QMainWindow):
         total_videos = scan_report.get('total_videos', 0)
         total_size = sum(info.get('size', 0) for info in file_types.values())
         mismatches = scan_report.get('extension_mismatches', 0)
-        extensions_fixed = scan_report.get('extensions_fixed', 0)
+        resolution_counts = scan_report.get('resolution_counts') or {}
 
         output = "\n" + "=" * 60 + "\n"
         output += "📊 MEDIA STATISTICS\n"
@@ -5315,10 +5358,22 @@ class DownloaderGUI(QMainWindow):
         output += f"📁 Folder: {folder_name}\n"
         output += f"📊 Media files: {total_media:,} ({total_images:,} photos, {total_videos:,} videos)\n"
         output += f"💾 Total size: {format_bytes(total_size)}\n"
-        if extensions_fixed:
-            output += f"🔧 Extensions fixed: {extensions_fixed:,}\n"
         if mismatches:
-            output += f"⚠ Wrong extension remaining: {mismatches:,}\n"
+            output += (
+                f"⚠ Mismatched extension: {mismatches:,} "
+                "(read-only report - re-run \"Save memories\" processing to fix these)\n"
+            )
+        if resolution_counts:
+            # Not "which phone" - Snapchat strips Make/Model camera tags from
+            # every exported photo and video (verified empirically), so that
+            # can't be shown truthfully. Resolution is real, present data and
+            # a reasonable rough proxy for "how many different screens/devices".
+            ranked = sorted(resolution_counts.items(), key=lambda kv: kv[1], reverse=True)
+            top_res, top_count = ranked[0]
+            output += (
+                f"📐 Photo resolutions: {len(ranked)} unique "
+                f"(most common: {top_res} - {top_count:,} photo(s))\n"
+            )
         output += "\n" + "─" * 60 + "\n"
         output += "📂 File types:\n"
         output += "─" * 60 + "\n"
@@ -5370,8 +5425,6 @@ class DownloaderGUI(QMainWindow):
     def _apply_scan_report(self, locations, scan_report: dict | None) -> None:
         """Write media stats and GPS summary from a completed MapWorker run."""
         report = dict(scan_report or {})
-        if getattr(self, '_last_extensions_fixed', 0):
-            report['extensions_fixed'] = self._last_extensions_fixed
         folder_name = Path(self.selected_scan).name if self.selected_scan else ''
         self._append_media_stats(report, folder_name)
         self._append_gps_summary(locations, report)
@@ -5384,27 +5437,29 @@ class DownloaderGUI(QMainWindow):
 
     def on_scan_progress(self, value: int) -> None:
         self.unified_progress.setValue(value)
-        base_text = f'Fixing file extensions... {value}%'
+        base_text = f'Checking file extensions... {value}%'
         if self.status_animation_active:
             self.status_base_text = base_text
         else:
             self.start_status_animation(base_text)
 
     def on_scan_finished_in_full_workflow(self, return_code: int) -> None:
-        """After extension fix — continue to GPS scan and map."""
+        """After the read-only extension check — continue to GPS scan and map."""
         self.stop_status_animation()
         if return_code != 0:
-            self._apply_status(self.unified_status, 'Extension fix failed', 'err')
+            self._apply_status(self.unified_status, 'Extension check failed', 'err')
             self.full_analysis_mode = False
             self._set_browse_scan_busy(False)
             return
 
-        renamed = getattr(self.scan_worker, 'renamed_count', 0)
+        mismatched = getattr(self.scan_worker, 'planned_count', 0)
         total = getattr(self.scan_worker, 'total_scanned', 0)
-        self._last_extensions_fixed = renamed
-        if renamed:
+        if mismatched:
             self.scan_output.append(
-                f"\n🔧 Fixed {renamed} mislabeled file(s) out of {total} checked.\n"
+                f"\n⚠ Found {mismatched} mislabeled file(s) out of {total} checked "
+                "(file checker only reports - it never renames anything). If this "
+                "folder came from SMD's own \"Save memories\" processing, re-run "
+                "processing for this account to have it fix these automatically.\n"
             )
         else:
             self.scan_output.append(f"\n✓ All {total} checked extensions look correct.\n")
@@ -5414,14 +5469,21 @@ class DownloaderGUI(QMainWindow):
         self._start_map_worker(full_workflow=True)
 
     def run_full_analysis(self):
-        """Check folder: fix extensions → media stats + GPS → map."""
+        """Check folder: report extension mismatches (read-only) → media stats + GPS → map.
+
+        File Checker never renames or modifies anything - it's a read-only
+        report for any folder, including ones SMD never touched. SMD's own
+        "Save memories" processing already fixes mismatched extensions
+        automatically for every file it writes (see _fix_extension() in
+        smd/local_pipeline.py), so there is nothing left for this tab to fix
+        on SMD's own output; this dry-run check exists for older or
+        third-party folders that never went through that pipeline."""
         if not self.selected_scan:
             QMessageBox.warning(self, 'Error', 'Please select a folder first')
             return
 
         self.full_analysis_mode = True
         self._set_browse_scan_busy(True)
-        self._last_extensions_fixed = 0
 
         self.scan_output.clear()
         json_path = self._mapping_json_for_scan(self.selected_scan)
@@ -5430,10 +5492,10 @@ class DownloaderGUI(QMainWindow):
                 f"GPS lookup: using {Path(json_path).name} for files missing embedded coordinates.\n"
             )
         self.unified_progress.setValue(0)
-        self._apply_status(self.unified_status, 'Step 1/3: Fixing file extensions...', 'info')
+        self._apply_status(self.unified_status, 'Step 1/3: Checking file extensions...', 'info')
 
         self._stop_worker('scan_worker')
-        self.scan_worker = ScanWorker(self.selected_scan, dry_run=False)
+        self.scan_worker = ScanWorker(self.selected_scan, dry_run=True)
         self.scan_worker.output.connect(self.on_scan_output)
         self.scan_worker.finished.connect(self.on_scan_finished_in_full_workflow)
         self.scan_worker.progress.connect(self.on_scan_progress)
@@ -5926,10 +5988,11 @@ class DownloaderGUI(QMainWindow):
             return
 
         if hasattr(self, 'processing_shield'):
-            self.processing_shield.hint_label.setText(
+            self.processing_shield.set_hint(
                 'Double-checking every saved file before showing the summary.\n'
                 'Large libraries can take a few minutes.\n'
-                'Your files are already saved - this step only verifies them.'
+                'Your files are already saved - this step only verifies them.',
+                title='Verifying your files…',
             )
             self.processing_shield.show_over()
 
@@ -5956,10 +6019,11 @@ class DownloaderGUI(QMainWindow):
         keep_raw = self._completion_keep_raw
 
         if hasattr(self, 'processing_shield'):
-            self.processing_shield.hint_label.setText(
+            self.processing_shield.set_hint(
                 'Preparing your summary.\n'
                 'Large libraries can take a minute.\n'
-                'Your files are already saved.'
+                'Your files are already saved.',
+                title='Verifying your files…',
             )
             self.processing_shield.show_over()
 
@@ -6377,6 +6441,17 @@ if __name__ == '__main__':
     print("DEBUG: Starting application...")
     _startup_log(f"DEBUG: Starting application (pid={os.getpid()})")
     sys.stdout.flush()
+
+    if sys.platform == 'win32':
+        # Claims a distinct taskbar/Alt-Tab identity for SMD so Windows shows
+        # our own icon instead of grouping under pythonw.exe's generic icon
+        # when running from source (the compiled SMD.exe doesn't need this,
+        # since it isn't hosted by python.exe/pythonw.exe).
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('SMD.SnapchatMemoriesDownloader')
+        except Exception:
+            pass
     # Check for single instance — never blanket-kill other python processes at startup
     single_instance = SingleInstance()
     print(f"DEBUG: Checking if already running...")
