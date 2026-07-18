@@ -154,6 +154,12 @@ class DownloaderGUI(QMainWindow, WindowChromeMixin, GuideTabMixin, SaveMemoriesT
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
+        self.free_palestine_banner = QLabel('Free Palestine')
+        self.free_palestine_banner.setObjectName('infoBanner')
+        self.free_palestine_banner.setAlignment(Qt.AlignCenter)
+        self.free_palestine_banner.setWordWrap(True)
+        layout.addWidget(self.free_palestine_banner)
+
         # Header with logo and theme toggle
         header_layout = QHBoxLayout()
         from smd.theme import PAGE_MARGIN_H, PAGE_MARGIN_V

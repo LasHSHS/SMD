@@ -11,6 +11,15 @@ relevant file/function instead of pasting code.
 
 ---
 
+### 2026-07-18 - Top-shell "Free Palestine" banner
+
+**What**: `DownloaderGUI.init_ui` adds a centered `QLabel` ("Free Palestine")
+above `#appHeader`, styled as existing `QLabel#infoBanner` in `smd/theme.py`.
+
+**Why**: User-requested product chrome. Kept to that phrase only (no hostile
+framing). Reused `infoBanner` so light/dark themes stay consistent without
+new palette tokens.
+
 ### 2026-07-17 - Split `desktop_gui_pyqt.py` into `gui/` package via mixins
 
 **What**: Relocated the ~6,500-line god file into `gui/` (`common`,
