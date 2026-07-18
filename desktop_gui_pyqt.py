@@ -36,71 +36,17 @@ if sys.stdout is None or sys.stderr is None:
     if sys.stderr is None:
         sys.stderr = _early_log
 
-import json
-import re
-import shutil
-import base64
-import html
-import atexit
-import psutil
+import tempfile
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QPushButton, QLabel, QFileDialog, QLineEdit,
-                             QTextEdit, QTextBrowser, QComboBox, QSpinBox, QCheckBox, QTabWidget, QTabBar, QProgressBar, QToolTip, QSizePolicy, QSplashScreen, QGroupBox, QGridLayout,
-                             QRadioButton, QButtonGroup, QFrame, QPlainTextEdit, QMenu, QScrollArea, QLayout, QGraphicsOpacityEffect)
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer, QObject, pyqtSlot, QSettings, QCoreApplication, QSize, QRect
-from PyQt5.QtGui import QFont, QIcon, QColor, QDesktopServices, QCursor, QPixmap, QPainter
-from PyQt5.QtWidgets import QMessageBox
-from PyQt5.QtWidgets import QDialog
-from smd.grip_splitter import ResultsGripSplitter
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QLabel, QTabWidget, QSplashScreen, QMessageBox,
+)
+from PyQt5.QtCore import Qt, QTimer, QSettings, QCoreApplication
+from PyQt5.QtGui import QFont, QIcon, QColor, QPixmap, QPainter
 
-from gui.common import (
-    ROOT,
-    TAB_SAVE_MEMORIES,
-    WEB_ENGINE_AVAILABLE,
-    QWebEngineView,
-    build_about_panel,
-    build_guide_panel,
-    build_help_panel,
-    configure_webengine_storage,
-    friendly_error_message,
-    play_happy_tone,
-    startup_log,
-)
-from gui.dialogs import (
-    DuplicateCompareDialog,
-    DuplicateReviewDialog,
-    SessionSummaryDialog,
-)
-from gui.widgets import (
-    DocBrowser,
-    FittedPixmapLabel,
-    FlowDocBrowser,
-    FlowLayout,
-    FullScreenMediaPopup,
-    LiveRunDashboard,
-    MediaViewer,
-    ProcessingShieldOverlay,
-    StreamRedirector,
-    WidthAwareColumn,
-    _MainTabBar,
-)
-from gui.workers import (
-    CompletionFinalizeWorker,
-    DuplicatePreviewWorker,
-    DuplicateScanWorker,
-    LocalExportWorker,
-    MapRenderWorker,
-    MapWorker,
-    ScanWorker,
-    StagingCheckWorker,
-    StagingVerifyWorker,
-    TechnicalStorageWorker,
-    _create_themed_map,
-    _qpixmap_from_pil,
-    generate_thumbnail_base64,
-)
+from gui.common import ROOT, configure_webengine_storage, startup_log
+from gui.widgets import FullScreenMediaPopup, ProcessingShieldOverlay, StreamRedirector, _MainTabBar
 from gui.single_instance import SingleInstance
 from gui.tabs.completion import CompletionMixin
 from gui.tabs.file_checker_tab import FileCheckerTabMixin
@@ -159,21 +105,8 @@ class DownloaderGUI(QMainWindow, WindowChromeMixin, GuideTabMixin, SaveMemoriesT
         self._storage_scan_generation = 0
         self._duplicate_scan_auto_open = False
 
-
-    
-    
-    
-
-
     def init_ui(self):
-        from smd.theme import (
-            CONTENT_AREA_MARGIN_H,
-            CONTENT_AREA_MARGIN_V,
-            SECTION_GAP,
-            SIDEBAR_WIDTH,
-            WINDOW_MIN_HEIGHT,
-            WINDOW_MIN_WIDTH,
-        )
+        from smd.theme import WINDOW_MIN_HEIGHT, WINDOW_MIN_WIDTH
         from smd.version import __version__
         self.setWindowTitle(f'Snapchat Memories Downloader v{__version__}')
         self.setGeometry(100, 100, 1280, 820)
@@ -540,7 +473,6 @@ if __name__ == '__main__':
     gui.activateWindow()
     startup_log("DEBUG: main window shown")
     try:
-        from PyQt5.QtWidgets import QDesktopWidget
         screen = QApplication.desktop().availableGeometry(gui)
         gui.move(
             screen.x() + max(0, (screen.width() - gui.width()) // 2),

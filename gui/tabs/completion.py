@@ -1,11 +1,9 @@
 """Post-run completion summary and duplicate-review mixin."""
 from __future__ import annotations
 
-from pathlib import Path
-
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import QMessageBox
 
-from gui.common import play_happy_tone
 from gui.dialogs import DuplicateReviewDialog, SessionSummaryDialog
 from gui.workers import (
     CompletionFinalizeWorker,

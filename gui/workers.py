@@ -17,6 +17,7 @@ import folium
 from folium.plugins import MarkerCluster
 from PIL import Image
 from PyQt5.QtCore import QThread, pyqtSignal
+from PyQt5.QtGui import QPixmap
 
 
 def _map_base_tile(*, dark: bool) -> str:
@@ -640,9 +641,6 @@ class MapWorker(QThread):
     
     def run(self):
         try:
-            import os
-            import time
-            
             folder_path = Path(self.folder)
             
             # Build JSON lookup if provided
@@ -1105,7 +1103,7 @@ def _qpixmap_from_pil(img: Image.Image) -> QPixmap | None:
     try:
         import io
 
-        from PyQt5.QtGui import QImage, QPixmap
+        from PyQt5.QtGui import QImage
 
         buf = io.BytesIO()
         img.save(buf, format='JPEG', quality=90)
@@ -1212,7 +1210,6 @@ class LocalExportWorker(QThread):
     def run(self):
         import re
         import threading
-        import time
         from smd.local_pipeline import process_bundled_export
         from smd.account_layout import resolve_account_paths
 

@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, QUrl
-from PyQt5.QtGui import QDesktopServices, QPixmap
+from PyQt5.QtCore import Qt, QSize, QUrl
+from PyQt5.QtGui import QDesktopServices, QIcon
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QScrollArea,
-    QWidget, QButtonGroup, QRadioButton, QMessageBox, QFrame, QSizePolicy,
-    QTextBrowser, QGroupBox,
+    QWidget, QButtonGroup, QCheckBox, QMessageBox, QFrame,
+    QSizePolicy, QTextBrowser, QGroupBox,
 )
 
 from gui.widgets import FittedPixmapLabel, FlowLayout

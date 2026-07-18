@@ -5,7 +5,7 @@ import base64
 
 from PyQt5.QtWidgets import QVBoxLayout, QSizePolicy, QMessageBox
 
-from gui.common import ROOT, TAB_SAVE_MEMORIES, build_guide_panel
+from gui.common import ROOT, build_guide_panel
 
 
 class GuideTabMixin:

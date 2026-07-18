@@ -1,15 +1,14 @@
 """Window chrome mixin: theme, nav helpers, technical view, close/cleanup."""
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, QTimer, QSettings, QUrl
-from PyQt5.QtGui import QIcon, QColor, QDesktopServices
+from PyQt5.QtCore import Qt, QSettings
+from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, QLabel,
-    QScrollArea, QFrame, QSizePolicy, QGraphicsOpacityEffect, QMessageBox,
+    QWidget, QVBoxLayout, QGridLayout, QPushButton, QLabel,
+    QScrollArea, QFrame, QSizePolicy,
 )
 
 from gui.common import ROOT, WEB_ENGINE_AVAILABLE
@@ -296,7 +295,7 @@ class WindowChromeMixin:
         return btn
 
     def _load_and_apply_theme(self):
-        from smd.theme import THEME_DARK, THEME_LIGHT, THEME_SYSTEM, resolve_theme
+        from smd.theme import THEME_DARK, THEME_SYSTEM, resolve_theme
 
         settings = QSettings('SnapchatMemories', 'Downloader')
         stored = settings.value('theme_mode')
@@ -361,8 +360,7 @@ class WindowChromeMixin:
             
         try:
             import ctypes
-            from ctypes import wintypes
-            
+
             # DWMWA_USE_IMMERSIVE_DARK_MODE = 20
             DWMWA_USE_IMMERSIVE_DARK_MODE = 20
             

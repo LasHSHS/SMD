@@ -9,16 +9,16 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, QSettings, QTimer, QUrl
-from PyQt5.QtGui import QDesktopServices, QCursor
+from PyQt5.QtCore import Qt, QSettings, QUrl
+from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, QLabel,
-    QLineEdit, QComboBox, QCheckBox, QProgressBar, QFileDialog, QMessageBox,
-    QSizePolicy, QMenu, QGraphicsOpacityEffect, QToolTip,
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton,
+    QLabel, QLineEdit, QComboBox, QCheckBox, QProgressBar, QFileDialog,
+    QMessageBox, QSizePolicy, QMenu, QGraphicsOpacityEffect,
 )
 
-from gui.common import ROOT, TAB_SAVE_MEMORIES, play_happy_tone, friendly_error_message
-from gui.widgets import LiveRunDashboard, ProcessingShieldOverlay, FlowLayout
+from gui.common import ROOT, TAB_SAVE_MEMORIES, play_happy_tone
+from gui.widgets import LiveRunDashboard
 from gui.workers import (
     LocalExportWorker,
     StagingCheckWorker,
@@ -104,7 +104,6 @@ class SaveMemoriesTabMixin:
         self.perf_mode_combo.setCurrentIndex(0)
         self.perf_mode_combo.currentIndexChanged.connect(self.on_perf_mode_changed)
 
-        import os
         cpu_cores = os.cpu_count() or 2
         self.cpu_info_label = QLabel(f'({cpu_cores} threads)')
         self.cpu_info_label.setProperty('class', 'caption')

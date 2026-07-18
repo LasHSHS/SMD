@@ -2,17 +2,17 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from PyQt5.QtCore import Qt, QTimer, QUrl
 from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QProgressBar,
-    QTextEdit, QFrame, QSizePolicy, QMessageBox, QFileDialog,
+    QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QProgressBar,
+    QTextEdit, QTextBrowser, QFrame, QMessageBox, QFileDialog,
 )
 
-from gui.common import ROOT, WEB_ENGINE_AVAILABLE, QWebEngineView
+from gui.common import WEB_ENGINE_AVAILABLE, QWebEngineView, play_happy_tone
 from gui.widgets import MediaViewer
 from gui.workers import MapRenderWorker, MapWorker, ScanWorker, _create_themed_map, generate_thumbnail_base64 as _generate_thumbnail_base64
 from smd.grip_splitter import ResultsGripSplitter

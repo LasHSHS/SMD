@@ -4,17 +4,14 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 from PIL import Image
-from PyQt5.QtCore import Qt, QObject, QTimer, pyqtSignal, QSize, QRect, QUrl
-from PyQt5.QtGui import QFont, QFontMetrics, QColor, QPixmap, QCursor
-from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
-from PyQt5.QtMultimediaWidgets import QVideoWidget
+from PyQt5.QtCore import Qt, QObject, QTimer, pyqtSignal, QSize, QRect
+from PyQt5.QtGui import QFontMetrics, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton,
     QLabel, QLayout, QTextBrowser, QTextEdit, QFrame, QPlainTextEdit,
-    QSizePolicy, QGraphicsOpacityEffect, QTabBar, QTabWidget, QScrollArea,
+    QSizePolicy, QTabBar, QTabWidget, QScrollArea,
 )
 
 
@@ -923,8 +920,6 @@ class _MainTabBar(QTabBar):
         self.setDrawBase(False)
 
     def tabSizeHint(self, index: int) -> QSize:
-        from PyQt5.QtGui import QFontMetrics
-
         base = super().tabSizeHint(index)
         text_width = QFontMetrics(self.font()).horizontalAdvance(self.tabText(index))
         return QSize(max(base.width(), text_width + self.EXTRA_PADDING_PX), base.height())
