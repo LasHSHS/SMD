@@ -154,12 +154,6 @@ class DownloaderGUI(QMainWindow, WindowChromeMixin, GuideTabMixin, SaveMemoriesT
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.free_palestine_banner = QLabel('Free Palestine')
-        self.free_palestine_banner.setObjectName('infoBanner')
-        self.free_palestine_banner.setAlignment(Qt.AlignCenter)
-        self.free_palestine_banner.setWordWrap(True)
-        layout.addWidget(self.free_palestine_banner)
-
         # Header with logo and theme toggle
         header_layout = QHBoxLayout()
         from smd.theme import PAGE_MARGIN_H, PAGE_MARGIN_V
@@ -198,6 +192,28 @@ class DownloaderGUI(QMainWindow, WindowChromeMixin, GuideTabMixin, SaveMemoriesT
         title_col.addLayout(subtitle_row)
         header_layout.addLayout(title_col)
         header_layout.addStretch()
+
+        free_palestine_url = 'https://matwproject.org/crisis-and-emergencies/palestine'
+        free_palestine_flag = ROOT / 'assets' / 'flags' / 'palestine.png'
+        flag_img_tag = (
+            f'<img src="{free_palestine_flag.as_posix()}" width="20" height="10" '
+            'style="vertical-align: middle;"> '
+            if free_palestine_flag.exists() else ''
+        )
+        self.free_palestine_label = QLabel(
+            f'<a href="{free_palestine_url}" style="text-decoration: none;">'
+            f'{flag_img_tag}Free Palestine</a>'
+        )
+        self.free_palestine_label.setObjectName('freePalestineLabel')
+        self.free_palestine_label.setTextFormat(Qt.RichText)
+        self.free_palestine_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self.free_palestine_label.setOpenExternalLinks(True)
+        self.free_palestine_label.setCursor(Qt.PointingHandCursor)
+        self.free_palestine_label.setToolTip('Donate or learn more - opens in your browser')
+        free_palestine_font = QFont()
+        free_palestine_font.setBold(True)
+        self.free_palestine_label.setFont(free_palestine_font)
+        header_layout.addWidget(self.free_palestine_label)
 
         self.support_btn = QPushButton('Support me')
         self.support_btn.setObjectName('supportBtn')

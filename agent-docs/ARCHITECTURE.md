@@ -214,9 +214,10 @@ Layout of `gui/`:
 - `tabs/guide_tab.py`, `tabs/save_memories_tab.py`, `tabs/completion.py`,
   `tabs/file_checker_tab.py`, `tabs/help_about_tabs.py` - tab mixins.
 
-Shell chrome in `DownloaderGUI.init_ui`: a top `infoBanner` label
-(`self.free_palestine_banner`, text "Free Palestine"), then
-`#appHeader`, then `#tabsShell` with the five tabs.
+Shell chrome in `DownloaderGUI.init_ui`: `#appHeader` (logo/title, a bold
+clickable `self.free_palestine_label` - flag emoji + "Free Palestine"
+linking to matwproject.org - just left of the Support button, then theme
+toggle), then `#tabsShell` with the five tabs.
 
 Five tabs (`self.tabs`): **Guide**, **Save memories** (Setup / Performance /
 Run / After-processing via `_rebuild_process_controls_grid`), **File

@@ -11,14 +11,31 @@ relevant file/function instead of pasting code.
 
 ---
 
-### 2026-07-18 - Top-shell "Free Palestine" banner
+### 2026-07-19 - "Free Palestine" header label is now a clickable flag link
 
-**What**: `DownloaderGUI.init_ui` adds a centered `QLabel` ("Free Palestine")
-above `#appHeader`, styled as existing `QLabel#infoBanner` in `smd/theme.py`.
+**What**: `self.free_palestine_label` (bold, left of the Support button in
+`#appHeader`) is rich-text HTML: a flag image + "Free Palestine" wrapped in
+an `<a href>` to `https://matwproject.org/crisis-and-emergencies/palestine`.
+`setOpenExternalLinks(True)` opens it in the system browser (same
+`QDesktopServices` mechanism used elsewhere, just via Qt's built-in rich-text
+handling instead of a manual `clicked` connection). The flag started as a
+Unicode emoji (`\U0001F1F5\U0001F1F8`) but that glyph didn't render (showed
+as a blank/tofu box) on the user's system font, so it was swapped for a
+real bitmap: `assets/flags/palestine.png` (300x150, generated with
+Pillow - exact 2:1 ratio, official black/white/green bands + red hoist
+triangle to the horizontal midpoint), embedded via `<img src=... width=20
+height=10>` inside the same anchor. `smd.spec` bundles `assets/flags/*`
+the same way it already does `assets/ui/*`.
 
-**Why**: User-requested product chrome. Kept to that phrase only (no hostile
-framing). Reused `infoBanner` so light/dark themes stay consistent without
-new palette tokens.
+### 2026-07-19 - Moved "Free Palestine" from top banner to header label
+
+**What**: Removed the centered `#infoBanner` row above `#appHeader`.
+`DownloaderGUI.init_ui` now places a bold `QLabel` ("Free Palestine",
+`self.free_palestine_label`) directly left of the Support button inside
+`#appHeader` instead.
+
+**Why**: User-requested repositioning - same text, less prominent chrome
+(inline in the header vs. a full-width banner row).
 
 ### 2026-07-17 - Split `desktop_gui_pyqt.py` into `gui/` package via mixins
 

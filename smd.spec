@@ -73,6 +73,12 @@ if ui_assets.is_dir():
         if f.is_file():
             datas.append((str(f), 'assets/ui'))
 
+flags_assets = Path('assets/flags')
+if flags_assets.is_dir():
+    for f in sorted(flags_assets.iterdir()):
+        if f.is_file():
+            datas.append((str(f), 'assets/flags'))
+
 for name in ('icon.ico', 'icon.png'):
     f = Path('assets') / name
     if f.is_file():
