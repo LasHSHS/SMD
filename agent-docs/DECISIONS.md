@@ -11,6 +11,29 @@ relevant file/function instead of pasting code.
 
 ---
 
+### 2026-07-19 - Flattened the "accounts" folder for Technical view custom base dirs
+
+**What**: `_account_paths()` (`gui/tabs/save_memories_tab.py`) used to put
+account folders at `<base_dir>/accounts/<name>/` whenever Technical view had
+a custom base dir set. Now it's `<base_dir>/<name>/` directly - no `accounts`
+wrapper - matching simple mode's `Desktop/<account>/` pattern. Also updated
+the two other places that assumed the `accounts/` subfolder:
+`_suggest_account_from_export()`'s existing-folder search and
+`restore_account_name_field()`'s single-account auto-fill.
+
+**Why**: User found the extra nesting level pointless when the base dir is
+already dedicated to SMD's own output (which it normally is, once picked).
+Simple mode never had this wrapper to begin with, so this just makes
+Technical view consistent with it.
+
+**Migration**: `migrate_flat_accounts_root()` (`smd/account_layout.py`) moves
+any existing `<base_dir>/accounts/<name>/` folders up one level (skips if a
+same-named flat folder already exists - never overwrites), then removes the
+now-empty `accounts/` dir. Runs automatically inside `_account_paths()`
+whenever `create=True`. Not related to the separate, always-hidden
+`%LOCALAPPDATA%/SnapchatMemoriesDownloader/accounts/<account>/` internal
+data root, which still nests under `accounts/` and was left alone.
+
 ### 2026-07-19 - "Free Palestine" header label is now a clickable flag link
 
 **What**: `self.free_palestine_label` (bold, left of the Support button in

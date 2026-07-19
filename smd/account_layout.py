@@ -164,6 +164,38 @@ def resolve_account_paths(
     return paths
 
 
+def migrate_flat_accounts_root(base_dir: Path) -> list[str]:
+    """
+    Flatten a legacy `<base_dir>/accounts/<name>/` layout (Technical view with a
+    custom base dir) into `<base_dir>/<name>/`, matching the simple mode's layout
+    (`Desktop/<name>/` - no "accounts" wrapper). Existing folders are moved, not
+    recreated, so nothing already downloaded is lost. Returns actions taken.
+    """
+    base_dir = Path(base_dir)
+    legacy_root = base_dir / "accounts"
+    actions: list[str] = []
+    if not legacy_root.is_dir():
+        return actions
+
+    for child in list(legacy_root.iterdir()):
+        if not child.is_dir():
+            continue
+        target = base_dir / child.name
+        if target.exists():
+            continue
+        shutil.move(str(child), str(target))
+        actions.append(f"Moved accounts/{child.name} -> {child.name}")
+
+    try:
+        if not any(legacy_root.iterdir()):
+            legacy_root.rmdir()
+            actions.append("Removed empty accounts/ folder")
+    except OSError:
+        pass
+
+    return actions
+
+
 def migrate_flat_library_to_subfolders(desktop_account: Path) -> bool:
     """
     Move loose files in Desktop/<account>/ into merged/ when user later enables raw copies.

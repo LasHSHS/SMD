@@ -6,6 +6,7 @@ from pathlib import Path
 from smd.account_layout import (
     AccountPaths,
     migrate_account_layout,
+    migrate_flat_accounts_root,
     resolve_account_paths,
     technical_storage_summary,
 )
@@ -51,6 +52,39 @@ def test_resolve_creates_technical_readme():
         readme = paths.technical_dir / "README.txt"
         assert readme.exists()
         assert "staging" in readme.read_text(encoding="utf-8").lower()
+
+
+def test_migrate_flat_accounts_root():
+    with tempfile.TemporaryDirectory() as tmp:
+        base_dir = Path(tmp)
+        legacy_account = base_dir / "accounts" / "Las"
+        (legacy_account / "downloads").mkdir(parents=True)
+        (legacy_account / "downloads" / "photo.jpg").write_bytes(b"x")
+
+        actions = migrate_flat_accounts_root(base_dir)
+
+        assert (base_dir / "Las" / "downloads" / "photo.jpg").exists()
+        assert not (base_dir / "accounts").exists()
+        assert actions
+
+
+def test_migrate_flat_accounts_root_skips_existing_target():
+    with tempfile.TemporaryDirectory() as tmp:
+        base_dir = Path(tmp)
+        (base_dir / "accounts" / "Las").mkdir(parents=True)
+        (base_dir / "Las").mkdir()
+        (base_dir / "Las" / "keep.txt").write_text("keep", encoding="utf-8")
+
+        migrate_flat_accounts_root(base_dir)
+
+        # Pre-existing flat folder is never overwritten.
+        assert (base_dir / "Las" / "keep.txt").exists()
+
+
+def test_migrate_flat_accounts_root_noop_without_legacy_folder():
+    with tempfile.TemporaryDirectory() as tmp:
+        base_dir = Path(tmp)
+        assert migrate_flat_accounts_root(base_dir) == []
 
 
 def test_technical_storage_summary():

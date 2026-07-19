@@ -62,6 +62,17 @@ Per account name, two roots:
 `AccountPaths` (dataclass) is the single source of truth for all these paths;
 always resolve via `resolve_account_paths()`, never hardcode a folder name.
 
+**Technical view + custom base dir** (`gui/tabs/save_memories_tab.py`,
+`_account_paths()`): when the user picks their own base folder (instead of
+the default `Desktop/SMD Media`), account folders sit flat under it -
+`<base_dir>/<account>/` - matching the simple-mode pattern above, with no
+extra `accounts/` wrapper (removed 2026-07-19; see `DECISIONS.md`). Any
+pre-existing `<base_dir>/accounts/<name>/` folders are auto-flattened by
+`migrate_flat_accounts_root()` the first time paths are resolved with
+`create=True`. This is unrelated to the always-hidden, always-nested
+`%LOCALAPPDATA%/.../accounts/<account>/` internal root above, which is
+untouched.
+
 ## Processing pipeline (`smd/local_pipeline.py`)
 
 Entry point: `process_bundled_export(...)`. Rough flow:

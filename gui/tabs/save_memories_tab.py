@@ -598,9 +598,9 @@ class SaveMemoriesTabMixin:
         short = base_id.replace("mydata~", "export-")
         search_dirs = []
         if self._technical_view_enabled():
-            accounts_root = Path(self.get_download_base_dir()) / "accounts"
-            if accounts_root.is_dir():
-                search_dirs.append(accounts_root)
+            base_dir = Path(self.get_download_base_dir())
+            if base_dir.is_dir():
+                search_dirs.append(base_dir)
         else:
             desktop = Path.home() / "Desktop"
             if desktop.is_dir():
@@ -810,12 +810,20 @@ class SaveMemoriesTabMixin:
             return self.get_default_base_dir()
 
     def _account_paths(self, account_name: str, *, create: bool = False):
-        from smd.account_layout import AccountPaths, migrate_account_layout, normalize_account_dir, resolve_account_paths
+        from smd.account_layout import (
+            AccountPaths,
+            migrate_account_layout,
+            migrate_flat_accounts_root,
+            normalize_account_dir,
+            resolve_account_paths,
+        )
 
         keep_raw = self.save_raw_chk.isChecked() if hasattr(self, 'save_raw_chk') else False
         if self._technical_view_enabled():
             base_dir = Path(self.get_download_base_dir())
-            account_dir = normalize_account_dir(base_dir / 'accounts' / account_name)
+            if create:
+                migrate_flat_accounts_root(base_dir)
+            account_dir = normalize_account_dir(base_dir / account_name)
             if create:
                 return resolve_account_paths(account_dir, migrate=True, create=True)
             return AccountPaths.for_account(account_dir)
@@ -1321,10 +1329,10 @@ class SaveMemoriesTabMixin:
                 if isinstance(last, str) and last.strip():
                     self.account_input.setText(last.strip())
                     return
-            accounts_dir = Path(self.get_download_base_dir()) / 'accounts'
-            if accounts_dir.exists():
+            base_dir = Path(self.get_download_base_dir())
+            if base_dir.exists():
                 dirs = sorted(
-                    (d.name for d in accounts_dir.iterdir() if d.is_dir()),
+                    (d.name for d in base_dir.iterdir() if d.is_dir()),
                     key=str.lower,
                 )
                 if len(dirs) == 1:
